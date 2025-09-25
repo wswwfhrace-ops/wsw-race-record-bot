@@ -78,33 +78,6 @@ def find_demo_and_map_link(map_name: str, target_time: str, demos_dir: str):
 
         return f"{mins:02d}:{secs:02d}"
 
-    def recTimeToMillis(time: str):
-        split = re.split(r"\.|:", time)
-        return int(split[-1]) + int(split[-2]) * 1000 + int(split[-3]) * 1000 * 60
-
-    finish_pattern = re.compile(r".*Race Finished.*Current: \^\d([\d:\.]*)")
-
-    def parseFinishTimes(file):
-        buf = io.BytesIO(file.read())
-        server_time_start = -1
-        while True:
-            msg_len, = struct.unpack('<l', buf.read(4))
-            if msg_len <= 0: break
-            msg_buf = io.BytesIO(buf.read(msg_len))
-            cmd, = struct.unpack('<b', msg_buf.read(1))
-            if cmd == 12:  # svc_frame
-                _, serverTime = struct.unpack('<hl', msg_buf.read(6))
-                if server_time_start == -1:
-                    server_time_start = serverTime
-                data = msg_buf.read()
-                data_str = "".join(filter(str.isprintable, data.decode('ascii', errors='ignore')))
-                m = finish_pattern.match(data_str)
-                if m != None:
-                    rec_time = m.group(1)
-                    server_time_end = serverTime - server_time_start
-                    yield (
-                    formatTime(server_time_end), rec_time, formatTime(server_time_end - recTimeToMillis(rec_time)))
-
     def check_demo_for_time(demo_path: str, target_time: str):
         """Returns (True, server_time) if demo contains target_time, otherwise (False, None)"""
         try:
