@@ -603,7 +603,7 @@ def create_records_embed(record_updates):
     local_2nd = [r for r in record_updates if r['type'] == 'NEW LOCAL 2ND']
 
     def format_record_text(record):
-        text = f"**{record['time']}** on **{record['map']}** by **{record['player']}**{record['tie']}\n"
+        text = f"__**{record['time']}** on **{record['map']}** by **{record['player']}** {record['tie']}__\n"
 
         if record['global_1st']:
             text += f"🥇 Global 1st: {record['global_1st']}\n"
