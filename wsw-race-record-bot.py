@@ -176,11 +176,6 @@ def format_race_time(ms):
     # else:
     #    return f"{seconds:02d}.{millis:03d}"
 
-def row_key(row):
-    version_id, player_id, map_id, time, version_rank, global_rank = row
-    # identify a record uniquely by version, player, map, and time
-    return (version_id, player_id, map_id, time)
-
 
 def checkforupdates():
     changes = []
@@ -193,164 +188,156 @@ def checkforupdates():
     else:
         print(f"Failed to download file. Status code: {response.status_code}")
 
-    # new_db = "unaltered - Copy.sqlite"
     new_db = "db.sqlite"
     old_db = "main_db.sqlite"
 
-    # connecting to the database
+    # Connect to databases
     cnew = sqlite3.connect(new_db)
     cmain = sqlite3.connect(old_db)
-    # cursor object
     crsrnew = cnew.cursor()
     crsrmain = cmain.cursor()
 
-    # Modified filtering logic: keep global 1st, global 2nd, local 1st, local 2nd
-    crsrnew.execute("""
-        SELECT id FROM race
-        WHERE 
-            (version_id != 1 AND global_rank <= 2)
-    """)
-    cnew.commit()
-    To_keep = crsrnew.fetchall()
-
-    crsrnew.execute("""
-        SELECT id FROM race
-        WHERE
-            (version_id = 1 AND version_rank <= 2)
-    """)
-    cnew.commit()
-    To_keep += crsrnew.fetchall()
-
-    # Step 2: Extract only the IDs into a flat list
-    ids_to_keep = {row[0] for row in To_keep}
-
-    # Step 3: Delete everything NOT in ids_to_keep
-    crsrnew.execute("SELECT id FROM race")
-    cnew.commit()
-    all_ids = {row[0] for row in crsrnew.fetchall()}
-
-    ids_to_delete = [(i,) for i in all_ids - ids_to_keep]  # List of tuples
-
-    # Step 4: Execute deletions
-    crsrnew.executemany("DELETE FROM race WHERE id = ?", ids_to_delete)
-    cnew.commit()
-
-    crsrnew.execute("""
-        SELECT * FROM race
-        ORDER BY map_id, global_rank, version_rank
-    """)
-    cnew.commit()
-
-    crsrnew.execute("Select COUNT (*) FROM map")
-    cnew.commit()
-    maptotal = crsrnew.fetchone()[0]
-
-    # delete and sort by map_id and version_rank
-    versionrank = 1
-    map_index = 1
-    listrow = []
-    seen_combinations = set()  # Track (player_id, map_id, version_id) combinations
-
-    while map_index <= maptotal:
-
-        # Get global 1st and 2nd
-        crsrnew.execute(
-            "Select * From race WHERE map_id = ? AND version_id != 1 AND global_rank <= 2 ORDER BY global_rank",
-            (map_index,))
-        cnew.commit()
-        newrows = crsrnew.fetchall()
-        for row in newrows:
-            combination = (row[2], row[3], row[1])  # (player_id, map_id, version_id)
-            if combination not in seen_combinations:
-                listrow.append(row)
-                seen_combinations.add(combination)
-
-        # Get local 1st and 2nd
-        crsrnew.execute(
-            "Select * From race WHERE map_id = ? AND version_rank <= 2 AND version_id = 1 ORDER BY version_rank",
-            (map_index,))
-        cnew.commit()
-        newrows = crsrnew.fetchall()
-        for row in newrows:
-            combination = (row[2], row[3], row[1])  # (player_id, map_id, version_id)
-            if combination not in seen_combinations:
-                listrow.append(row)
-                seen_combinations.add(combination)
-
-        map_index = map_index + 1
-
-    updated_rows = []
-    for index, row in enumerate(listrow):
-        row_list = list(row)  # convert tuple to list
-        row_list[0] = index + 1  # reset ID to start from 1
-        updated_rows.append(tuple(row_list))  # convert back to tuple
-
-    crsrnew.execute("DELETE From race")
-    cnew.commit()
-
-    crsrnew.executemany("INSERT INTO race VALUES (?,?,?,?,?,?,?)", updated_rows)
-    cnew.commit()
-
-    crsrnew.execute("Select COUNT (*) FROM race")
-    cnew.commit()
-    newtotal = crsrnew.fetchone()[0]
-
-    crsrmain.execute("Select COUNT (*) FROM race")
-    cmain.commit()
-    maintotal = crsrmain.fetchone()[0]
-
-    crsrmain.execute("Select * From race")
-    crsrnew.execute("Select * From race")
-
-    cmain.commit()
-    cnew.commit()
-
-    newrows = crsrnew.fetchall()
-    mainrows = crsrmain.fetchall()
-
-    map_index = 1
-
-    from collections import defaultdict
-
-    map_index = 1
-
-    def get_reference_records(map_id, cursor, connection):
-        """Get global and local reference records for comparison"""
-        # Get global 1st and 2nd
-        cursor.execute("""
-            SELECT version_id, player_id, time, version_rank, global_rank
-            FROM race
-            WHERE map_id = ? AND global_rank <= 2
-            ORDER BY global_rank
-        """, (map_id,))
+    def get_key_records(cursor, connection):
+        """Get the 4 key records for each map: global 1st, global 2nd, local 1st, local 2nd"""
+        cursor.execute("SELECT COUNT(*) FROM map")
         connection.commit()
-        global_records = cursor.fetchall()
+        map_count = cursor.fetchone()[0]
 
-        global_1st = global_records[0] if len(global_records) > 0 else None
-        global_2nd = global_records[1] if len(global_records) > 1 else None
+        key_records = {}  # map_id -> list of key records
 
-        # Get local 1st and 2nd (version_id = 1)
-        cursor.execute("""
-            SELECT version_id, player_id, time, version_rank, global_rank
-            FROM race
-            WHERE map_id = ? AND version_id = 1 AND version_rank <= 2
-            ORDER BY version_rank
-        """, (map_id,))
+        for map_id in range(1, map_count + 1):
+            records = []
+
+            # Get global 1st and 2nd (any version, ordered by global_rank, then version priority, then player_id)
+            cursor.execute("""
+                SELECT id, version_id, player_id, map_id, time, version_rank, global_rank, 'global' as record_type
+                FROM race 
+                WHERE map_id = ? AND global_rank <= 2 
+                ORDER BY global_rank, version_id, player_id
+            """, (map_id,))
+            connection.commit()
+            global_records = cursor.fetchall()
+
+            # Add global records with proper labeling based on actual rank
+            for record in global_records:
+                record_list = list(record)
+                global_rank = record[6]  # global_rank is at index 6
+                record_list[-1] = f'global_{global_rank}'  # 'global_1' or 'global_2'
+                records.append(tuple(record_list))
+
+            # Get local 1st and 2nd (version_id = 1, ordered by version_rank, then player_id)
+            cursor.execute("""
+                SELECT id, version_id, player_id, map_id, time, version_rank, global_rank, 'local' as record_type
+                FROM race 
+                WHERE map_id = ? AND version_id = 1 AND version_rank <= 2 
+                ORDER BY version_rank, player_id
+            """, (map_id,))
+            connection.commit()
+            local_records = cursor.fetchall()
+
+            # Add local records with proper labeling based on actual rank
+            for record in local_records:
+                record_list = list(record)
+                version_rank = record[5]  # version_rank is at index 5
+                record_list[-1] = f'local_{version_rank}'  # 'local_1' or 'local_2'
+                records.append(tuple(record_list))
+
+            key_records[map_id] = records
+
+        return key_records, map_count
+
+    def filter_database_to_key_records(cursor, connection, key_records):
+        """Remove all records except the key ones and renumber IDs"""
+        # Collect all key record IDs
+        all_key_ids = set()
+        for map_records in key_records.values():
+            for record in map_records:
+                all_key_ids.add(record[0])  # record[0] is the ID
+
+        # Delete all records not in key IDs
+        if all_key_ids:
+            placeholders = ','.join('?' * len(all_key_ids))
+            cursor.execute(f"DELETE FROM race WHERE id NOT IN ({placeholders})", list(all_key_ids))
+        else:
+            cursor.execute("DELETE FROM race")
         connection.commit()
-        local_records = cursor.fetchall()
 
-        local_1st = local_records[0] if len(local_records) > 0 else None
-        local_2nd = local_records[1] if len(local_records) > 1 else None
+        # Get remaining records and renumber them
+        cursor.execute("SELECT * FROM race ORDER BY map_id, global_rank, version_id, player_id")
+        connection.commit()
+        remaining_records = cursor.fetchall()
 
-        return global_1st, global_2nd, local_1st, local_2nd
+        # Clear table and reinsert with new IDs
+        cursor.execute("DELETE FROM race")
+        connection.commit()
 
-    def format_record_info(cursor, player_id, map_id, time):
+        updated_records = []
+        for new_id, record in enumerate(remaining_records, 1):
+            record_list = list(record)
+            record_list[0] = new_id  # Set new ID
+            updated_records.append(tuple(record_list))
+
+        if updated_records:
+            cursor.executemany("INSERT INTO race VALUES (?,?,?,?,?,?,?)", updated_records)
+            connection.commit()
+
+    # Process new database first
+    print("Processing new database...")
+    new_key_records, map_count = get_key_records(crsrnew, cnew)
+    filter_database_to_key_records(crsrnew, cnew, new_key_records)
+
+    # Get old database key records
+    print("Processing old database...")
+    old_key_records, _ = get_key_records(crsrmain, cmain)
+
+    def normalize_record_for_comparison(record):
+        """Create a comparable version of a record (ignoring ID)"""
+        # record format: (id, version_id, player_id, map_id, time, version_rank, global_rank, record_type)
+        return (record[1], record[2], record[3], record[4], record[5], record[6], record[7])  # exclude ID
+
+    def detect_changes(old_records, new_records, map_id):
+        """Detect what changed for a specific map"""
+        changes = []
+
+        # Create lookup by record type for easier comparison
+        old_by_type = {}
+        new_by_type = {}
+
+        for record in old_records.get(map_id, []):
+            old_by_type[record[7]] = normalize_record_for_comparison(record)  # record[7] is record_type
+
+        for record in new_records.get(map_id, []):
+            new_by_type[record[7]] = normalize_record_for_comparison(record)
+
+        # Check each record type
+        record_types = ['global_1', 'global_2', 'local_1', 'local_2']
+
+        for record_type in record_types:
+            old_record = old_by_type.get(record_type)
+            new_record = new_by_type.get(record_type)
+
+            if old_record != new_record:
+                if new_record and not old_record:
+                    # New record appeared
+                    changes.append(('added', record_type, new_record))
+                elif new_record and old_record:
+                    # Record changed
+                    changes.append(('updated', record_type, new_record, old_record))
+                elif old_record and not new_record:
+                    # Record disappeared (shouldn't happen often)
+                    changes.append(('removed', record_type, old_record))
+
+        return changes
+
+    def format_record_info(cursor, connection, player_id, map_id, time):
         """Format player name, map name, and time"""
         cursor.execute("SELECT simplified FROM player WHERE id = ?", (player_id,))
+        connection.commit()
         player_name = cursor.fetchone()
         player_name = player_name[0] if player_name else f"(ID {player_id})"
 
         cursor.execute("SELECT name FROM map WHERE id = ?", (map_id,))
+        connection.commit()
         map_name = cursor.fetchone()
         map_name = map_name[0] if map_name else f"(ID {map_id})"
 
@@ -358,159 +345,236 @@ def checkforupdates():
 
         return player_name, map_name, formatted_time
 
+    def get_reference_times(cursor, connection, map_id):
+        """Get reference times for context in announcements"""
+        references = {}
+
+        # Get all current records for this map
+        cursor.execute("""
+            SELECT version_id, player_id, time, version_rank, global_rank
+            FROM race
+            WHERE map_id = ?
+            ORDER BY global_rank, version_id, player_id
+        """, (map_id,))
+        connection.commit()
+        records = cursor.fetchall()
+
+        for record in records:
+            version_id, player_id, time, version_rank, global_rank = record
+
+            if global_rank == 1:
+                references['global_1'] = record
+            elif global_rank == 2:
+                references['global_2'] = record
+            elif version_id == 1 and version_rank == 1:
+                references['local_1'] = record
+            elif version_id == 1 and version_rank == 2:
+                references['local_2'] = record
+
+        return references
+
     # Store record updates for the embed
     record_updates = []
-
-    # NEW: if we ever fail to find a demo for a new record, abort this cycle
     missing_demo = False
+    processed_records = set()  # Track (player_id, map_id, time) to avoid duplicates
 
-    while map_index <= maptotal:
-        crsrnew.execute("""
-            SELECT version_id, player_id, map_id, time, version_rank, global_rank
-            FROM race
-            WHERE map_id = ?
-            ORDER BY global_rank, version_rank, player_id
-        """, (map_index,))
-        cnew.commit()
-        newrows = crsrnew.fetchall()
+    print("Detecting changes...")
 
-        crsrmain.execute("""
-            SELECT version_id, player_id, map_id, time, version_rank, global_rank
-            FROM race
-            WHERE map_id = ?
-            ORDER BY global_rank, version_rank, player_id
-        """, (map_index,))
-        cmain.commit()
-        mainrows = crsrmain.fetchall()
+    # Check each map for changes
+    for map_id in range(1, map_count + 1):
+        map_changes = detect_changes(old_key_records, new_key_records, map_id)
 
-        if mainrows != newrows:
-            print(f"\nChanges detected in map {map_index}:")
+        if map_changes:
+            print(f"\nChanges detected in map {map_id}:")
+            for change in map_changes:
+                print(f"  Change: {change[0]} {change[1]}")
+                if len(change) > 2:
+                    print(f"    New: {change[2]}")
+                if len(change) > 3:
+                    print(f"    Old: {change[3]}")
 
-            old_keys = {row_key(r) for r in mainrows}
-            new_keys = {row_key(r) for r in newrows}
+            # Get reference times for context
+            references = get_reference_times(crsrnew, cnew, map_id)
 
-            # Find truly new records (not just re-ranked ones)
-            added = [r for r in newrows if row_key(r) not in old_keys]
-
-            # Get reference records for output
-            global_1st, global_2nd, local_1st, local_2nd = get_reference_records(map_index, crsrnew, cnew)
-
-            # Process each new record
-            for row in added:
+            for change in map_changes:
                 if missing_demo:
-                    break  # already decided to abort this cycle
-
-                version_id, player_id, map_id, time, version_rank, global_rank = row
-
-                # Check if this time already existed in the old list for same map/version
-                time_already_existed = any(
-                    r[2] == map_id and r[3] == time and r[0] == version_id
-                    for r in mainrows
-                )
-
-                player_name, map_name, formatted_time = format_record_info(crsrnew, player_id, map_id, time)
-
-                tie_suffix = " TIE" if time_already_existed else ""
-
-                # Create record update object
-                record_update = {
-                    'type': '',
-                    'player': player_name,
-                    'map': map_name,
-                    'time': formatted_time,
-                    'tie': tie_suffix,
-                    'global_1st': None,
-                    'global_2nd': None,
-                    'local_1st': None,
-                    'map_link': None,
-                    'demo_link': None,
-                    'demo_jump': None
-                }
-
-                # Determine what record was achieved and gather reference times
-                if global_rank == 1:
-                    record_update['type'] = 'NEW GLOBAL 1ST'
-                    if global_2nd:
-                        g2_player, g2_map, g2_time = format_record_info(crsrnew, global_2nd[1], map_id, global_2nd[2])
-                        crsrnew.execute("SELECT name FROM version WHERE id = ?", (global_2nd[0],))
-                        g2_version = crsrnew.fetchone()
-                        g2_version = g2_version[0] if g2_version else f"Version {global_2nd[0]}"
-                        record_update['global_2nd'] = f"{g2_time} by {g2_player} in {g2_version}"
-
-                elif global_rank == 2:
-                    record_update['type'] = 'NEW GLOBAL 2ND'
-                    if global_1st:
-                        g1_player, g1_map, g1_time = format_record_info(crsrnew, global_1st[1], map_id, global_1st[2])
-                        crsrnew.execute("SELECT name FROM version WHERE id = ?", (global_1st[0],))
-                        g1_version = crsrnew.fetchone()
-                        g1_version = g1_version[0] if g1_version else f"Version {global_1st[0]}"
-                        record_update['global_1st'] = f"{g1_time} by {g1_player} in {g1_version}"
-
-                elif version_rank == 1 and version_id == 1:
-                    if global_rank != 2:
-                        record_update['type'] = 'NEW LOCAL 1ST'
-                        if global_1st:
-                            g1_player, g1_map, g1_time = format_record_info(crsrnew, global_1st[1], map_id,
-                                                                            global_1st[2])
-                            crsrnew.execute("SELECT name FROM version WHERE id = ?", (global_1st[0],))
-                            g1_version = crsrnew.fetchone()
-                            g1_version = g1_version[0] if g1_version else f"Version {global_1st[0]}"
-                            record_update['global_1st'] = f"{g1_time} by {g1_player} in {g1_version}"
-
-                elif version_rank == 2 and version_id == 1:
-                    record_update['type'] = 'NEW LOCAL 2ND'
-                    if global_1st:
-                        g1_player, g1_map, g1_time = format_record_info(crsrnew, global_1st[1], map_id, global_1st[2])
-                        crsrnew.execute("SELECT name FROM version WHERE id = ?", (global_1st[0],))
-                        g1_version = crsrnew.fetchone()
-                        g1_version = g1_version[0] if g1_version else f"Version {global_1st[0]}"
-                        record_update['global_1st'] = f"{g1_time} by {g1_player} in {g1_version}"
-
-                    # Only show local 1st if it's different from global 1st
-                    if local_1st and global_1st and (local_1st[1] != global_1st[1] or local_1st[2] != global_1st[2]):
-                        l1_player, l1_map, l1_time = format_record_info(crsrnew, local_1st[1], map_id, local_1st[2])
-                        record_update['local_1st'] = f"{l1_time} by {l1_player}"
-
-                # Get demo and map links
-                script_dir = os.path.dirname(os.path.abspath(__file__))
-                DEMOS_DIR = os.path.join(script_dir, 'demos')
-
-                print(f"Starting search for map: {map_name} with time: {formatted_time}")
-
-                try:
-                    result = find_demo_and_map_link(map_name, formatted_time, DEMOS_DIR)
-
-                    if len(result) == 3:
-                        map_link, demo_link, server_time = result
-                    elif len(result) == 2:
-                        map_link, demo_link = result
-                        server_time = None
-                    else:
-                        map_link = demo_link = server_time = None
-
-                    # If no demo is available for this new record, abort the whole cycle now.
-                    if not demo_link:
-                        missing_demo = True
-                        break
-
-                    record_update['map_link'] = map_link
-                    record_update['demo_link'] = demo_link
-                    record_update['demo_jump'] = server_time
-
-                except Exception as e:
-                    # Treat any error during demo retrieval as "demo not yet available"
-                    missing_demo = True
                     break
 
-                if record_update['type']:  # Only add if we have a valid record type
-                    record_updates.append(record_update)
+                change_type = change[0]  # 'added', 'updated', 'removed'
+                record_type = change[1]  # 'global_1', 'global_2', 'local_1', 'local_2'
+                new_record = change[2] if len(change) > 2 else None
+                old_record = change[3] if len(change) > 3 else None
+
+                # Only process added or updated records (new records)
+                if change_type in ['added', 'updated'] and new_record:
+                    # new_record format: (version_id, player_id, map_id, time, version_rank, global_rank, record_type)
+                    version_id, player_id, map_id_from_record, time, version_rank, global_rank, _ = new_record
+
+                    # Check if we've already processed this exact record
+                    record_key = (player_id, map_id, time)
+                    if record_key in processed_records:
+                        print(f"Skipping duplicate record: {record_key}")
+                        continue
+                    processed_records.add(record_key)
+
+                    # Skip records that were pushed down or are not actual improvements
+                    if change_type == 'updated' and old_record:
+                        old_version_id, old_player_id, old_map_id, old_time, old_version_rank, old_global_rank, _ = old_record
+
+                        # If this is the same player/time but moved to a worse rank, skip it (was pushed down)
+                        if (player_id == old_player_id and time == old_time and
+                                ((record_type == 'global_2' and old_global_rank == 1) or
+                                 (record_type == 'local_2' and old_version_rank == 1))):
+                            print(
+                                f"Skipping pushed-down record: {player_name} moved from rank {old_global_rank} to rank {global_rank}")
+                            continue
+
+                        # Skip if it's a worse time taking over a rank (shouldn't happen but just in case)
+                        if time > old_time:
+                            print(
+                                f"Skipping worse time: {format_race_time(time)} vs previous {format_race_time(old_time)}")
+                            continue
+
+                        # Skip global_2 changes where the "new" record was actually pushed down from global_1
+                        # Check if this player/time combination was the old global_1
+                        if record_type == 'global_2':
+                            # Look for this exact player/time in the old global_1 slot
+                            old_global_1 = None
+                            for old_change in map_changes:
+                                if len(old_change) > 3 and old_change[1] == 'global_1':
+                                    old_global_1_record = old_change[3]  # old record from global_1 change
+                                    if (old_global_1_record[1] == player_id and  # same player
+                                            old_global_1_record[3] == time):  # same time
+                                        print(f"Skipping global_2 - this was the old global_1 that got pushed down")
+                                        old_global_1 = True
+                                        break
+                            if old_global_1:
+                                continue
+
+                    # Check if this exact time existed before for this map/version
+                    time_already_existed = False
+                    if change_type == 'updated' and old_record:
+                        old_version_id, old_player_id, old_map_id, old_time, old_version_rank, old_global_rank, _ = old_record
+                        time_already_existed = (old_time == time)  # Same time as old record
+
+                        # Skip if it's just a reordering of identical times (not a real improvement)
+                        if time_already_existed and record_type.startswith('global'):
+                            print(
+                                f"Skipping tie reordering: {player_name} vs previous holder, both with {format_race_time(time)}")
+                            continue
+
+                    player_name, map_name, formatted_time = format_record_info(crsrnew, cnew, player_id, map_id, time)
+                    tie_suffix = " TIE" if time_already_existed else ""
+
+                    # Create record update object
+                    record_update = {
+                        'type': '',
+                        'player': player_name,
+                        'map': map_name,
+                        'time': formatted_time,
+                        'tie': tie_suffix,
+                        'global_1st': None,
+                        'global_2nd': None,
+                        'local_1st': None,
+                        'map_link': None,
+                        'demo_link': None,
+                        'demo_jump': None
+                    }
+
+                    # Determine record type and set reference times
+                    if record_type == 'global_1':
+                        record_update['type'] = 'NEW GLOBAL 1ST'
+                        if 'global_2' in references:
+                            ref = references['global_2']
+                            g2_player, _, g2_time = format_record_info(crsrnew, cnew, ref[1], map_id, ref[2])
+                            crsrnew.execute("SELECT name FROM version WHERE id = ?", (ref[0],))
+                            cnew.commit()
+                            g2_version = crsrnew.fetchone()
+                            g2_version = g2_version[0] if g2_version else f"Version {ref[0]}"
+                            record_update['global_2nd'] = f"{g2_time} by {g2_player} in {g2_version}"
+
+                    elif record_type == 'global_2':
+                        record_update['type'] = 'NEW GLOBAL 2ND'
+                        if 'global_1' in references:
+                            ref = references['global_1']
+                            g1_player, _, g1_time = format_record_info(crsrnew, cnew, ref[1], map_id, ref[2])
+                            crsrnew.execute("SELECT name FROM version WHERE id = ?", (ref[0],))
+                            cnew.commit()
+                            g1_version = crsrnew.fetchone()
+                            g1_version = g1_version[0] if g1_version else f"Version {ref[0]}"
+                            record_update['global_1st'] = f"{g1_time} by {g1_player} in {g1_version}"
+
+                    elif record_type == 'local_1':
+                        # Only announce local 1st if it's not also global 2nd
+                        if global_rank != 2:
+                            record_update['type'] = 'NEW LOCAL 1ST'
+                            if 'global_1' in references:
+                                ref = references['global_1']
+                                g1_player, _, g1_time = format_record_info(crsrnew, cnew, ref[1], map_id, ref[2])
+                                crsrnew.execute("SELECT name FROM version WHERE id = ?", (ref[0],))
+                                cnew.commit()
+                                g1_version = crsrnew.fetchone()
+                                g1_version = g1_version[0] if g1_version else f"Version {ref[0]}"
+                                record_update['global_1st'] = f"{g1_time} by {g1_player} in {g1_version}"
+
+                    elif record_type == 'local_2':
+                        record_update['type'] = 'NEW LOCAL 2ND'
+                        if 'global_1' in references:
+                            ref = references['global_1']
+                            g1_player, _, g1_time = format_record_info(crsrnew, cnew, ref[1], map_id, ref[2])
+                            crsrnew.execute("SELECT name FROM version WHERE id = ?", (ref[0],))
+                            cnew.commit()
+                            g1_version = crsrnew.fetchone()
+                            g1_version = g1_version[0] if g1_version else f"Version {ref[0]}"
+                            record_update['global_1st'] = f"{g1_time} by {g1_player} in {g1_version}"
+
+                        # Show local 1st if different from global 1st
+                        if 'local_1' in references and 'global_1' in references:
+                            local_ref = references['local_1']
+                            global_ref = references['global_1']
+                            if local_ref[1] != global_ref[1] or local_ref[2] != global_ref[
+                                2]:  # different player or time
+                                l1_player, _, l1_time = format_record_info(crsrnew, cnew, local_ref[1], map_id,
+                                                                           local_ref[2])
+                                record_update['local_1st'] = f"{l1_time} by {l1_player}"
+
+                    # Get demo and map links
+                    if record_update['type']:  # Only if we have a valid record type
+                        script_dir = os.path.dirname(os.path.abspath(__file__))
+                        DEMOS_DIR = os.path.join(script_dir, 'demos')
+
+                        print(f"Starting search for map: {map_name} with time: {formatted_time}")
+
+                        try:
+                            result = find_demo_and_map_link(map_name, formatted_time, DEMOS_DIR)
+
+                            if len(result) == 3:
+                                map_link, demo_link, server_time = result
+                            elif len(result) == 2:
+                                map_link, demo_link = result
+                                server_time = None
+                            else:
+                                map_link = demo_link = server_time = None
+
+                            # If no demo is available, abort the whole cycle
+                            if not demo_link:
+                                missing_demo = True
+                                break
+
+                            record_update['map_link'] = map_link
+                            record_update['demo_link'] = demo_link
+                            record_update['demo_jump'] = server_time
+
+                        except Exception as e:
+                            missing_demo = True
+                            break
+
+                        record_updates.append(record_update)
 
         if missing_demo:
-            break  # stop processing further maps
+            break
 
-        map_index += 1
-
-    # If any new record lacked a demo, skip the entire cycle: no DB replacement, no output.
+    # If any new record lacked a demo, skip the entire cycle
     if missing_demo:
         try:
             crsrmain.close()
@@ -522,49 +586,8 @@ def checkforupdates():
         print("Demo not available yet; skipping this cycle without updating or posting.")
         return []
 
-    # insert record into main
-    # reset main - keep global 1st, 2nd and local 1st, 2nd
-    map_index = 1
-    listrow = []
-    seen_combinations = set()  # Track (player_id, map_id, version_id) combinations
-
-    while map_index <= maptotal:
-        # Get global 1st and 2nd
-        crsrnew.execute("Select * From race WHERE map_id = ? AND global_rank <= 2 ORDER BY global_rank", (map_index,))
-        cnew.commit()
-        newrows = crsrnew.fetchall()
-        for row in newrows:
-            combination = (row[2], row[3], row[1])  # (player_id, map_id, version_id)
-            if combination not in seen_combinations:
-                listrow.append(row)
-                seen_combinations.add(combination)
-
-        # Get local 1st and 2nd
-        crsrnew.execute(
-            "Select * From race WHERE map_id = ? AND version_rank <= 2 AND version_id = 1 ORDER BY version_rank",
-            (map_index,))
-        cnew.commit()
-        newrows = crsrnew.fetchall()
-        for row in newrows:
-            combination = (row[2], row[3], row[1])  # (player_id, map_id, version_id)
-            if combination not in seen_combinations:
-                listrow.append(row)
-                seen_combinations.add(combination)
-
-        map_index = map_index + 1
-
-    updated_rows = []
-    for index, row in enumerate(listrow):
-        row_list = list(row)  # convert tuple to list
-        row_list[0] = index + 1  # reset ID to start from 1
-        updated_rows.append(tuple(row_list))  # convert back to tuple
-
-    crsrnew.execute("DELETE From race")
-    cnew.commit()
-
-    crsrnew.executemany("INSERT INTO race VALUES (?,?,?,?,?,?,?)", updated_rows)
-    cnew.commit()
-
+    # Replace old database with new one
+    print("Replacing old database...")
     crsrmain.close()
     cmain.close()
     crsrnew.close()
@@ -575,10 +598,9 @@ def checkforupdates():
         print("Deleted old database.")
 
     shutil.move(new_db, old_db)
-    print("test.sqlite has replaced main.sqlite.")
+    print("New database has replaced old database.")
 
     return record_updates
-
 
 
 import discord
