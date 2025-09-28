@@ -7,6 +7,13 @@ import re
 from bs4 import BeautifulSoup
 import gzip, sys, struct, io, re
 
+RECORD_CHANNELS = [
+    1387767813325721661,  # Your main server channel
+    1342037348761862195,  # Add more channel IDs here for other servers
+]
+
+ERROR_LOG_CHANNEL = 1387767813325721661
+
 # URL of your SQLite file
 url = "http://livesow.net/race/api/db.sqlite"
 
@@ -612,17 +619,16 @@ bot = commands.Bot(command_prefix='!', intents=discord.Intents.all())
 last_embed_message = None
 
 
-def create_records_embed(record_updates):
-    """Create a comprehensive embed with all record updates"""
-    embed = discord.Embed(
-        title="🏁 Warsow Race Records Update",
-        color=0x00ff00,
-        timestamp=discord.utils.utcnow()
-    )
-
+def create_records_embeds(record_updates, max_per_embed=4):
+    """Create multiple embeds if needed to handle Discord limits"""
     if not record_updates:
-        embed.description = "No new records found."
-        return embed
+        embed = discord.Embed(
+            title="🏁 Warsow Race Records Update",
+            description="No new records found.",
+            color=0x00ff00,
+            timestamp=discord.utils.utcnow()
+        )
+        return [embed]
 
     # Group updates by type for better organization
     global_1st = [r for r in record_updates if r['type'] == 'NEW GLOBAL 1ST']
@@ -654,140 +660,342 @@ def create_records_embed(record_updates):
 
         return text
 
-    # Add fields for each category
-    if global_1st:
-        field_text = ""
-        for record in global_1st[:3]:  # Limit to 3 to avoid embed limits
-            field_text += format_record_text(record) + "\n"
-        if len(global_1st) > 3:
-            field_text += f"... and {len(global_1st) - 3} more"
-        embed.add_field(name="🏆 New World Record", value=field_text[:1024], inline=False)
+    def create_embed_for_records(records_dict, embed_number=1, total_embeds=1):
+        """Create a single embed for a subset of records"""
+        title = "🏁 Warsow Race Records Update"
+        if total_embeds > 1:
+            title += f" ({embed_number}/{total_embeds})"
 
-    if global_2nd:
-        field_text = ""
-        for record in global_2nd[:3]:
-            field_text += format_record_text(record) + "\n"
-        if len(global_2nd) > 3:
-            field_text += f"... and {len(global_2nd) - 3} more"
-        embed.add_field(name="🥈 New Second Place", value=field_text[:1024], inline=False)
+        embed = discord.Embed(
+            title=title,
+            color=0x00ff00,
+            timestamp=discord.utils.utcnow()
+        )
 
-    if local_1st:
-        field_text = ""
-        for record in local_1st[:3]:
-            field_text += format_record_text(record) + "\n"
-        if len(local_1st) > 3:
-            field_text += f"... and {len(local_1st) - 3} more"
-        embed.add_field(name="🏠 New WSW 2.1 World Record", value=field_text[:1024], inline=False)
+        # Add fields for each category in this embed
+        if records_dict.get('global_1st'):
+            field_text = ""
+            for record in records_dict['global_1st']:
+                field_text += format_record_text(record) + "\n"
+            embed.add_field(name="🏆 New World Records", value=field_text[:1024], inline=False)
 
-    if local_2nd:
-        field_text = ""
-        for record in local_2nd[:3]:
-            field_text += format_record_text(record) + "\n"
-        if len(local_2nd) > 3:
-            field_text += f"... and {len(local_2nd) - 3} more"
-        embed.add_field(name="🏡 New WSW 2.1 Second Place", value=field_text[:1024], inline=False)
+        if records_dict.get('global_2nd'):
+            field_text = ""
+            for record in records_dict['global_2nd']:
+                field_text += format_record_text(record) + "\n"
+            embed.add_field(name="🥈 New Second Place", value=field_text[:1024], inline=False)
 
-    # Add summary
+        if records_dict.get('local_1st'):
+            field_text = ""
+            for record in records_dict['local_1st']:
+                field_text += format_record_text(record) + "\n"
+            embed.add_field(name="🏠 New WSW 2.1 Records", value=field_text[:1024], inline=False)
+
+        if records_dict.get('local_2nd'):
+            field_text = ""
+            for record in records_dict['local_2nd']:
+                field_text += format_record_text(record) + "\n"
+            embed.add_field(name="🏡 New WSW 2.1 Second Place", value=field_text[:1024], inline=False)
+
+        return embed
+
+    def estimate_embed_size(records_dict):
+        """Estimate the character count of an embed"""
+        size = 100  # Base size for title, timestamp, etc.
+
+        for category, records in records_dict.items():
+            if records:
+                # Field name + field content
+                field_size = 50  # Field name overhead
+                for record in records:
+                    field_size += len(format_record_text(record))
+                size += field_size
+
+        return size
+
+    # Try to fit records into embeds without exceeding Discord limits
+    embeds = []
+    all_records = {
+        'global_1st': global_1st,
+        'global_2nd': global_2nd,
+        'local_1st': local_1st,
+        'local_2nd': local_2nd
+    }
+
+    # Simple approach: if we have too many records, split them into chunks
     total_records = len(record_updates)
-    embed.set_footer(text=f"Total new records: {total_records}")
 
-    return embed
+    if total_records <= max_per_embed:
+        # Single embed can handle all records
+        embed = create_embed_for_records(all_records)
+        embed.set_footer(text=f"Total new records: {total_records}")
+        embeds.append(embed)
+    else:
+        # Need to split into multiple embeds
+        # Prioritize global 1st > global 2nd > local 1st > local 2nd
+        priority_order = [
+            ('global_1st', global_1st, "🏆 New World Record"),
+            ('global_2nd', global_2nd, "🥈 New Second Place"),
+            ('local_1st', local_1st, "🏠 New WSW 2.1 Record"),
+            ('local_2nd', local_2nd, "🏡 New WSW 2.1 Second Place")
+        ]
+
+        current_embed_records = {}
+        current_embed_count = 0
+        embed_number = 1
+
+        # Estimate total embeds needed
+        estimated_embeds = (total_records + max_per_embed - 1) // max_per_embed
+
+        for category, records, field_name in priority_order:
+            if not records:
+                continue
+
+            for record in records:
+                # Check if we need to start a new embed
+                if current_embed_count >= max_per_embed:
+                    # Create embed with current records
+                    embed = create_embed_for_records(current_embed_records, embed_number, estimated_embeds)
+                    embed.set_footer(
+                        text=f"Part {embed_number}/{estimated_embeds} • Total new records: {total_records}")
+                    embeds.append(embed)
+
+                    # Reset for next embed
+                    current_embed_records = {}
+                    current_embed_count = 0
+                    embed_number += 1
+
+                # Add record to current embed
+                if category not in current_embed_records:
+                    current_embed_records[category] = []
+                current_embed_records[category].append(record)
+                current_embed_count += 1
+
+        # Create final embed with remaining records
+        if current_embed_records:
+            embed = create_embed_for_records(current_embed_records, embed_number, embed_number)
+            embed.set_footer(text=f"Part {embed_number}/{embed_number} • Total new records: {total_records}")
+            embeds.append(embed)
+
+    return embeds
+
+
+
+# Store last embed messages for each channel
+last_embed_messages = {}  # channel_id -> message object
+
+
+async def log_error(message, error=None):
+    """Log errors to the designated error channel"""
+    error_channel = bot.get_channel(ERROR_LOG_CHANNEL)
+    if error_channel:
+        embed = discord.Embed(
+            title="🚨 Bot Error",
+            description=message,
+            color=0xff0000,
+            timestamp=discord.utils.utcnow()
+        )
+
+        if error:
+            embed.add_field(name="Error Details", value=f"```{str(error)[:1000]}```", inline=False)
+
+        try:
+            await error_channel.send(embed=embed)
+        except Exception as e:
+            print(f"Failed to send error log: {e}")
+    else:
+        print(f"Error channel not found. Error: {message}")
 
 
 @bot.event
 async def on_ready():
-    print("Bot ready")
+    print(f"Bot ready! Connected to {len(bot.guilds)} servers")
+    print(f"Monitoring {len(RECORD_CHANNELS)} channels for record updates")
+    if ERROR_LOG_CHANNEL:
+        print(f"Error logging enabled for channel {ERROR_LOG_CHANNEL}")
     auto_check.start()  # start the background loop when the bot is ready
 
 
 @bot.command()
 async def update(ctx):
-    global last_embed_message
+    global last_embed_messages
 
-    await ctx.send("Checking for updates...")
+    await ctx.send("🔄 Checking for updates...")
     try:
         record_updates = checkforupdates()
-        embed = create_records_embed(record_updates)
+        embeds = create_records_embeds(record_updates)
 
-        if last_embed_message:
+        channel_id = ctx.channel.id
+
+        if channel_id in last_embed_messages:
             try:
-                # Try to edit the existing message
-                await last_embed_message.edit(embed=embed)
-                await ctx.send(" Updated existing embed with new records!")
+                # Try to edit the existing message with new embeds
+                await last_embed_messages[channel_id].edit(embeds=embeds)
+                await ctx.send("✅ Updated existing embed with new records!")
             except discord.NotFound:
                 # Message was deleted, send a new one
-                last_embed_message = await ctx.send(embed=embed)
-            except discord.HTTPException:
+                last_embed_messages[channel_id] = await ctx.send(embeds=embeds)
+                await ctx.send("✅ Sent new embeds (previous message not found)!")
+            except discord.HTTPException as e:
                 # Some other error, send a new message
-                last_embed_message = await ctx.send(embed=embed)
+                await log_error(f"Error editing embed in channel {channel_id}", e)
+                last_embed_messages[channel_id] = await ctx.send(embeds=embeds)
+                await ctx.send("✅ Sent new embeds due to edit error!")
         else:
             # No previous message, send a new one
-            last_embed_message = await ctx.send(embed=embed)
+            last_embed_messages[channel_id] = await ctx.send(embeds=embeds)
+            await ctx.send("✅ Sent new embeds!")
 
     except Exception as e:
-        await ctx.send(f" Error occurred: {e}")
+        await ctx.send(f"❌ Error occurred: {e}")
+        await log_error(f"Error in manual update command", e)
 
 
 @tasks.loop(minutes=60)  # change 60 to however many minutes you want
 async def auto_check():
-    global last_embed_message
-
-    channel_id = 1387767813325721661  # <-- replace with your Discord channel ID
-    channel = bot.get_channel(channel_id)
-
-    if channel is None:
-        print(" Channel not found, check the channel ID")
-        return
+    global last_embed_messages
 
     try:
         record_updates = checkforupdates()
 
         # Only send/update if there are actual updates
         if record_updates:
-            embed = create_records_embed(record_updates)
+            embeds = create_records_embeds(record_updates)
 
-            if last_embed_message:
+            # Send to all configured channels
+            successful_updates = 0
+            failed_updates = 0
+
+            for channel_id in RECORD_CHANNELS:
+                channel = bot.get_channel(channel_id)
+
+                if channel is None:
+                    await log_error(
+                        f"Channel {channel_id} not found. Bot may not be in that server or lacks permissions.")
+                    failed_updates += 1
+                    continue
+
                 try:
-                    # Try to edit the existing message
-                    await last_embed_message.edit(embed=embed)
-                    print("Updated existing embed with new records")
-                except discord.NotFound:
-                    # Message was deleted, send a new one
-                    last_embed_message = await channel.send(embed=embed)
-                    print(" Sent new embed (previous message not found)")
-                except discord.HTTPException as e:
-                    # Some other error, send a new message
-                    print(f" Error editing message: {e}")
-                    last_embed_message = await channel.send(embed=embed)
-                    print(" Sent new embed due to edit error")
-            else:
-                # No previous message, send a new one
-                last_embed_message = await channel.send(embed=embed)
-                print(" Sent new embed (no previous message)")
+                    if channel_id in last_embed_messages:
+                        try:
+                            # Try to edit the existing message with new embeds
+                            await last_embed_messages[channel_id].edit(embeds=embeds)
+                            print(f"✅ Updated existing embeds in {channel.guild.name}#{channel.name}")
+                            successful_updates += 1
+                        except discord.NotFound:
+                            # Message was deleted, send a new one
+                            last_embed_messages[channel_id] = await channel.send(embeds=embeds)
+                            print(
+                                f"✅ Sent new embeds in {channel.guild.name}#{channel.name} (previous message not found)")
+                            successful_updates += 1
+                        except discord.HTTPException as e:
+                            # Some other error, send a new message
+                            await log_error(f"Error editing message in {channel.guild.name}#{channel.name}", e)
+                            last_embed_messages[channel_id] = await channel.send(embeds=embeds)
+                            print(f"✅ Sent new embeds in {channel.guild.name}#{channel.name} due to edit error")
+                            successful_updates += 1
+                    else:
+                        # No previous message, send a new one
+                        last_embed_messages[channel_id] = await channel.send(embeds=embeds)
+                        print(f"✅ Sent new embeds in {channel.guild.name}#{channel.name} (no previous message)")
+                        successful_updates += 1
+
+                except discord.Forbidden:
+                    await log_error(f"No permission to send messages in {channel.guild.name}#{channel.name}")
+                    failed_updates += 1
+                except Exception as e:
+                    await log_error(f"Unexpected error sending to {channel.guild.name}#{channel.name}", e)
+                    failed_updates += 1
+
+            # Log summary
+            total_records = len(record_updates)
+            summary = f"📊 Update Summary: {total_records} new records sent to {successful_updates}/{len(RECORD_CHANNELS)} channels"
+            if failed_updates > 0:
+                summary += f" ({failed_updates} failed)"
+            print(summary)
+
+            if failed_updates > 0:
+                await log_error(summary)
+
         else:
-            print(" No new records found")
+            print("ℹ️ No new records found")
 
     except Exception as e:
-        print(f"Error in auto_check: {e}")
+        error_msg = f"Critical error in auto_check: {str(e)}"
+        print(f"❌ {error_msg}")
+        await log_error("Critical error in auto_check loop", e)
 
 
-# Add command to clear the stored message reference
+# Add command to clear the stored message references
 @bot.command()
 async def clear_embed(ctx):
-    global last_embed_message
-    last_embed_message = None
-    await ctx.send("✅ Cleared embed message reference. Next update will create a new embed.")
+    global last_embed_messages
+    last_embed_messages.clear()
+    await ctx.send("✅ Cleared all embed message references. Next update will create new embeds.")
 
 
 # Add command to get embed info
 @bot.command()
 async def embed_info(ctx):
-    global last_embed_message
-    if last_embed_message:
-        await ctx.send(
-            f"📋 Current embed message ID: {last_embed_message.id} in channel {last_embed_message.channel.mention}")
+    global last_embed_messages
+    if last_embed_messages:
+        info_text = f"📋 Tracking {len(last_embed_messages)} embed messages:\n"
+        for channel_id, message in last_embed_messages.items():
+            try:
+                channel = bot.get_channel(channel_id)
+                channel_name = f"{channel.guild.name}#{channel.name}" if channel else f"Channel {channel_id}"
+                embed_count = len(message.embeds) if hasattr(message, 'embeds') else 1
+                info_text += f"• {channel_name}: Message {message.id} ({embed_count} embeds)\n"
+            except:
+                info_text += f"• Channel {channel_id}: Message {message.id}\n"
+        await ctx.send(info_text[:2000])  # Discord message limit
     else:
-        await ctx.send("❌ No embed message currently tracked.")
+        await ctx.send("❌ No embed messages currently tracked.")
+
+
+# Add command to test error logging
+@bot.command()
+async def test_error(ctx):
+    await log_error("🧪 Test Error", "This is a test error to verify error logging is working.")
+    await ctx.send("✅ Test error sent to error log channel!")
+
+
+# Add command to add/remove channels
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def add_channel(ctx, channel_id: int):
+    if channel_id not in RECORD_CHANNELS:
+        RECORD_CHANNELS.append(channel_id)
+        await ctx.send(f"✅ Added channel {channel_id} to record updates list.")
+    else:
+        await ctx.send(f"❌ Channel {channel_id} is already in the list.")
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def remove_channel(ctx, channel_id: int):
+    if channel_id in RECORD_CHANNELS:
+        RECORD_CHANNELS.remove(channel_id)
+        if channel_id in last_embed_messages:
+            del last_embed_messages[channel_id]
+        await ctx.send(f"✅ Removed channel {channel_id} from record updates list.")
+    else:
+        await ctx.send(f"❌ Channel {channel_id} is not in the list.")
+
+
+@bot.command()
+async def list_channels(ctx):
+    if RECORD_CHANNELS:
+        channel_list = "📋 **Record Update Channels:**\n"
+        for i, channel_id in enumerate(RECORD_CHANNELS, 1):
+            channel = bot.get_channel(channel_id)
+            if channel:
+                channel_list += f"{i}. {channel.guild.name}#{channel.name} ({channel_id})\n"
+            else:
+                channel_list += f"{i}. Channel {channel_id} (not accessible)\n"
+        await ctx.send(channel_list[:2000])
+    else:
+        await ctx.send("❌ No channels configured for record updates.")
 
 
 with open("token.txt") as file:
