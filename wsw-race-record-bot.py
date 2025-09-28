@@ -176,6 +176,11 @@ def format_race_time(ms):
     # else:
     #    return f"{seconds:02d}.{millis:03d}"
 
+def row_key(row):
+    version_id, player_id, map_id, time, version_rank, global_rank = row
+    # identify a record uniquely by version, player, map, and time
+    return (version_id, player_id, map_id, time)
+
 
 def checkforupdates():
     changes = []
@@ -381,10 +386,11 @@ def checkforupdates():
         if mainrows != newrows:
             print(f"\nChanges detected in map {map_index}:")
 
-            new_set = set(newrows)
-            main_set = set(mainrows)
+            old_keys = {row_key(r) for r in mainrows}
+            new_keys = {row_key(r) for r in newrows}
 
-            added = list(new_set - main_set)
+            # Find truly new records (not just re-ranked ones)
+            added = [r for r in newrows if row_key(r) not in old_keys]
 
             # Get reference records for output
             global_1st, global_2nd, local_1st, local_2nd = get_reference_records(map_index, crsrnew, cnew)
