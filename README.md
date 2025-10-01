@@ -2,6 +2,7 @@
 
 
 Remember to change the channel id and the output_path.
+Dont change my channel id or the errorlog channel id. it is to check if it is working fine
 
 One will also need to add the token.txt file themselves
 
