@@ -122,7 +122,7 @@ def find_demo_and_map_link(map_name: str, target_time: str, demos_dir: str):
                 m = finish_pattern.match(data_str)
                 if m != None:
                     rec_time = m.group(1)
-                    server_time_end = serverTime - server_time_start - 1000
+                    server_time_end = serverTime - server_time_start - 3000
                     yield (
                     formatTime(server_time_end), rec_time, formatTime(server_time_end - recTimeToMillis(rec_time)))
 
@@ -1211,3 +1211,4 @@ with open("token.txt") as file:
     token = file.read()
 
 bot.run(token)
+
