@@ -1,6 +1,8 @@
 import sqlite3
 import os
 import shutil
+import time
+
 import requests
 import subprocess
 import re
@@ -12,7 +14,7 @@ RECORD_CHANNELS = [
     1342037348761862195,  # Add more channel IDs here for other servers
 ]
 
-ERROR_LOG_CHANNEL = 1387767813325721661
+ERROR_LOG_CHANNEL = 1421923420836331531
 
 # URL of your SQLite file
 url = "http://livesow.net/race/api/db.sqlite"
@@ -72,7 +74,7 @@ def find_demo_and_map_link(map_name: str, target_time: str, demos_dir: str):
             r.raise_for_status()
             with open(out_path, 'wb') as f:
                 f.write(r.content)
-            print(f"Downloaded: {out_path}")
+            #print(f"Downloaded: {out_path}")
             return out_path
         except requests.RequestException as e:
             print(f"Error downloading {url}: {e}")
@@ -161,7 +163,7 @@ def find_demo_and_map_link(map_name: str, target_time: str, demos_dir: str):
                 os.remove(downloaded_path)
                 break  # Exit the loop once a matching demo is found
             else:
-                print(f"Target time not found in this demo. Deleting: {downloaded_path}")
+                #print(f"Target time not found in this demo. Deleting: {downloaded_path}")
                 os.remove(downloaded_path)
 
     if found_demo_url:
@@ -612,6 +614,7 @@ def checkforupdates():
 
 import discord
 from discord.ext import commands, tasks
+import asyncio
 
 bot = commands.Bot(command_prefix='!', intents=discord.Intents.all())
 
@@ -677,7 +680,7 @@ def create_records_embeds(record_updates, max_per_embed=4):
             field_text = ""
             for record in records_dict['global_1st']:
                 field_text += format_record_text(record) + "\n"
-            embed.add_field(name="🏆 New World Records", value=field_text[:1024], inline=False)
+            embed.add_field(name="🏆 New World Record", value=field_text[:1024], inline=False)
 
         if records_dict.get('global_2nd'):
             field_text = ""
@@ -689,7 +692,7 @@ def create_records_embeds(record_updates, max_per_embed=4):
             field_text = ""
             for record in records_dict['local_1st']:
                 field_text += format_record_text(record) + "\n"
-            embed.add_field(name="🏠 New WSW 2.1 Records", value=field_text[:1024], inline=False)
+            embed.add_field(name="🏠 New WSW 2.1 World Record", value=field_text[:1024], inline=False)
 
         if records_dict.get('local_2nd'):
             field_text = ""
@@ -736,7 +739,7 @@ def create_records_embeds(record_updates, max_per_embed=4):
         priority_order = [
             ('global_1st', global_1st, "🏆 New World Record"),
             ('global_2nd', global_2nd, "🥈 New Second Place"),
-            ('local_1st', local_1st, "🏠 New WSW 2.1 Record"),
+            ('local_1st', local_1st, "🏠 New WSW 2.1 World Record"),
             ('local_2nd', local_2nd, "🏡 New WSW 2.1 Second Place")
         ]
 
@@ -784,31 +787,194 @@ def create_records_embeds(record_updates, max_per_embed=4):
 # Store last embed messages for each channel
 last_embed_messages = {}  # channel_id -> message object
 
+# Global reference to the bot for logging
+_bot_instance = None
 
-async def log_error(message, error=None):
-    """Log errors to the designated error channel"""
-    error_channel = bot.get_channel(ERROR_LOG_CHANNEL)
+# Message batching system
+log_batch = []
+batch_timer = None
+
+
+async def send_batched_logs():
+    """Send all batched log messages as plain text messages with aggressive delays"""
+    global log_batch, _bot_instance
+
+    if not log_batch or not _bot_instance:
+        return
+
+    error_channel = _bot_instance.get_channel(ERROR_LOG_CHANNEL)
+    if not error_channel:
+        original_print("Error channel not found for batch logging")
+        log_batch.clear()
+        return
+
+    try:
+        # Create header with timestamp and summary
+        errors = [msg for msg in log_batch if msg['is_error']]
+        total_messages = len(log_batch)
+        error_count = len(errors)
+
+        # Create one big message with all logs
+        header = f"📊 **Bot Activity Log** - {discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
+        header += f"Total: {total_messages} messages ({error_count} errors)\n"
+        header += "─" * 50 + "\n"
+
+        # Add all messages in chronological order
+        log_text = ""
+        for msg in log_batch:
+            timestamp = msg['timestamp'].strftime('%H:%M:%S')
+            prefix = "🚨" if msg['is_error'] else "ℹ️"
+            log_text += f"[{timestamp}] {prefix} {msg['content']}\n"
+
+        full_message = header + log_text
+
+        # Split into multiple messages if too long (Discord limit is 2000 characters)
+        max_length = 1700  # Even more conservative buffer
+
+        if len(full_message) <= max_length:
+            # Single message
+            await error_channel.send(f"```\n{full_message}\n```")
+        else:
+            # Split into multiple messages with VERY long delays
+            # Send header first
+            await error_channel.send(f"```\n{header}\n```")
+            await asyncio.sleep(10)  # 10 second delay after header
+            time.sleep((10))
+
+            # Split the log content
+            lines = log_text.split('\n')
+            current_chunk = ""
+            chunk_number = 1
+
+            for line in lines:
+                # Check if adding this line would exceed the limit
+                test_chunk = current_chunk + line + "\n"
+                if len(test_chunk) > max_length and current_chunk:
+                    # Send current chunk
+                    chunk_header = f"📄 Part {chunk_number}:\n" + "─" * 20 + "\n"
+                    await error_channel.send(f"```\n{chunk_header}{current_chunk}\n```")
+                    await asyncio.sleep(15)  # 15 second delay between parts!!
+                    current_chunk = line + "\n"
+                    chunk_number += 1
+                else:
+                    current_chunk = test_chunk
+
+            # Send final chunk if any content remains
+            if current_chunk.strip():
+                chunk_header = f"📄 Part {chunk_number}:\n" + "─" * 20 + "\n"
+                await error_channel.send(f"```\n{chunk_header}{current_chunk}\n```")
+
+    except Exception as e:
+        # Fallback to console if Discord fails
+        original_print(f"Failed to send batched logs: {e}")
+        for msg in log_batch:
+            original_print(f"[BATCH] {msg['content']}")
+
+    # Clear the batch
+    log_batch.clear()
+
+
+def schedule_batch_send():
+    """Schedule sending batched logs after a delay"""
+    global batch_timer, _bot_instance
+
+    if batch_timer:
+        batch_timer.cancel()
+
+    if not _bot_instance:
+        return
+
+
+    async def delayed_send():
+        await asyncio.sleep(30)  # Wait 30 seconds to batch more messages
+        await send_batched_logs()
+
+    try:
+        loop = asyncio.get_event_loop()
+        batch_timer = loop.create_task(delayed_send())
+    except Exception as e:
+        original_print(f"Failed to schedule batch send: {e}")
+
+
+async def log_error(message, error=None, is_info=False):
+    """Log critical errors immediately (bypasses batching for important errors)"""
+    if not _bot_instance:
+        original_print(f"Bot not ready for logging: {message}")
+        return
+
+    error_channel = _bot_instance.get_channel(ERROR_LOG_CHANNEL)
     if error_channel:
-        embed = discord.Embed(
-            title="🚨 Bot Error",
-            description=message,
-            color=0xff0000,
-            timestamp=discord.utils.utcnow()
-        )
+        timestamp = discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        prefix = "ℹ️ INFO" if is_info else "🚨 CRITICAL ERROR"
 
-        if error:
-            embed.add_field(name="Error Details", value=f"```{str(error)[:1000]}```", inline=False)
+        log_message = f"**{prefix}** - {timestamp} UTC\n"
+        log_message += f"```\n{message}\n"
+
+        if error and not is_info:
+            log_message += f"\nError Details:\n{str(error)[:500]}\n"
+
+        log_message += "```"
 
         try:
-            await error_channel.send(embed=embed)
+            await error_channel.send(log_message)
         except Exception as e:
-            print(f"Failed to send error log: {e}")
+            original_print(f"Failed to send critical error log: {e}")
     else:
-        print(f"Error channel not found. Error: {message}")
+        original_print(f"Error channel not found. Message: {message}")
+
+
+def log_to_discord_batch(message, is_error=False):
+    """Add message to batch for later sending"""
+    global log_batch
+
+    # Add to batch
+    log_batch.append({
+        'content': message,
+        'is_error': is_error,
+        'timestamp': discord.utils.utcnow()
+    })
+
+    # Schedule batch sending
+    schedule_batch_send()
+
+    # If batch gets very large, send immediately to avoid memory issues
+    if len(log_batch) >= 100:  # Much higher threshold
+        if _bot_instance:
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                loop.create_task(send_batched_logs())
+            except:
+                pass
+
+
+# Custom print function that batches messages
+original_print = print
+
+
+def discord_print(*args, **kwargs):
+    """Replace print to send output to both console and Discord (batched)"""
+    # Print to console as normal
+    original_print(*args, **kwargs)
+
+    # Also add to Discord batch
+    if args and _bot_instance:
+        message = ' '.join(str(arg) for arg in args)
+        # Determine if this looks like an error
+        error_keywords = ['error', 'failed', 'exception', 'critical', 'missing demo', '❌', '🚨', '⚠️']
+        is_error = any(keyword in message.lower() for keyword in error_keywords)
+        log_to_discord_batch(message, is_error)
+
+
+# Replace the built-in print function
+print = discord_print
 
 
 @bot.event
 async def on_ready():
+    global _bot_instance
+    _bot_instance = bot  # Store bot reference for logging
+
     print(f"Bot ready! Connected to {len(bot.guilds)} servers")
     print(f"Monitoring {len(RECORD_CHANNELS)} channels for record updates")
     if ERROR_LOG_CHANNEL:
@@ -880,31 +1046,31 @@ async def auto_check():
                         try:
                             # Try to edit the existing message with new embeds
                             await last_embed_messages[channel_id].edit(embeds=embeds)
-                            print(f"✅ Updated existing embeds in {channel.guild.name}#{channel.name}")
+                            print(f"✅ Updated existing embeds in {channel.name}")
                             successful_updates += 1
                         except discord.NotFound:
                             # Message was deleted, send a new one
                             last_embed_messages[channel_id] = await channel.send(embeds=embeds)
                             print(
-                                f"✅ Sent new embeds in {channel.guild.name}#{channel.name} (previous message not found)")
+                                f"✅ Sent new embeds in {channel.name} (previous message not found)")
                             successful_updates += 1
                         except discord.HTTPException as e:
                             # Some other error, send a new message
-                            await log_error(f"Error editing message in {channel.guild.name}#{channel.name}", e)
+                            await log_error(f"Error editing message in {channel.name}", e)
                             last_embed_messages[channel_id] = await channel.send(embeds=embeds)
-                            print(f"✅ Sent new embeds in {channel.guild.name}#{channel.name} due to edit error")
+                            print(f"✅ Sent new embeds in {channel.name} due to edit error")
                             successful_updates += 1
                     else:
                         # No previous message, send a new one
                         last_embed_messages[channel_id] = await channel.send(embeds=embeds)
-                        print(f"✅ Sent new embeds in {channel.guild.name}#{channel.name} (no previous message)")
+                        print(f"✅ Sent new embeds in {channel.name} (no previous message)")
                         successful_updates += 1
 
                 except discord.Forbidden:
-                    await log_error(f"No permission to send messages in {channel.guild.name}#{channel.name}")
+                    await log_error(f"No permission to send messages in {channel.name}")
                     failed_updates += 1
                 except Exception as e:
-                    await log_error(f"Unexpected error sending to {channel.guild.name}#{channel.name}", e)
+                    await log_error(f"Unexpected error sending to {channel.name}", e)
                     failed_updates += 1
 
             # Log summary
@@ -953,11 +1119,54 @@ async def embed_info(ctx):
         await ctx.send("❌ No embed messages currently tracked.")
 
 
-# Add command to test error logging
+# Add command to test console output (batched)
+@bot.command()
+async def test_console(ctx):
+    """Test that console outputs are being batched and sent to error channel"""
+    print("🧪 This is a test info message 1")
+    print("✅ This is a test info message 2")
+    print("ℹ️ This is a test info message 3")
+    print("❌ This is a test error message with keyword 'error'")
+    print("⚠️ Demo not available for testing - this should trigger error detection")
+    print("🚨 Another error message")
+    print("📊 Processing complete")
+    await ctx.send("✅ Test messages sent! They will be batched and appear in error channel within ~5 seconds.")
+
+
+# Add command to force send current batch
+@bot.command()
+async def flush_logs(ctx):
+    """Force send any pending batched logs immediately"""
+    global log_batch
+    if log_batch:
+        await send_batched_logs()
+        await ctx.send(f"✅ Flushed {len(log_batch)} pending log messages to error channel.")
+    else:
+        await ctx.send("ℹ️ No pending log messages to flush.")
+
+
+# Add command to check batch status
+@bot.command()
+async def log_status(ctx):
+    """Check the current logging batch status"""
+    global log_batch
+    await ctx.send(f"📊 Current batch: {len(log_batch)} messages pending")
+
+
+# Add command to test error logging (immediate)
 @bot.command()
 async def test_error(ctx):
-    await log_error("🧪 Test Error", "This is a test error to verify error logging is working.")
-    await ctx.send("✅ Test error sent to error log channel!")
+    await log_error("🧪 Test Error", "This is a test error to verify immediate error logging is working.")
+    await ctx.send("✅ Test error sent immediately to error log channel!")
+
+
+# Add command to test demo not found scenario
+@bot.command()
+async def test_demo_missing(ctx):
+    print("🎥 Demo not available yet; skipping this cycle without updating or posting.")
+    print("❌ Failed to find demo for map test-map with time 00:12.345")
+    print("⚠️ Retrying in next update cycle")
+    await ctx.send("✅ Demo missing messages sent! Will be batched and sent to error channel.")
 
 
 # Add command to add/remove channels
