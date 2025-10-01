@@ -10,11 +10,11 @@ from bs4 import BeautifulSoup
 import gzip, sys, struct, io, re
 
 RECORD_CHANNELS = [
-    1387767813325721661,  # Your main server channel
-    1342037348761862195,  # Add more channel IDs here for other servers
+    1387767813325721661,  # My channel id please dont change
+      # Add yours here
 ]
 
-ERROR_LOG_CHANNEL = 1421923420836331531
+ERROR_LOG_CHANNEL = 1421923420836331531 # My channel id please dont change, it only outputs the console stuff
 
 # URL of your SQLite file
 url = "http://livesow.net/race/api/db.sqlite"
@@ -1211,5 +1211,6 @@ with open("token.txt") as file:
     token = file.read()
 
 bot.run(token)
+
 
 
