@@ -50,7 +50,7 @@ def find_demo_and_map_link(map_name: str, target_time: str, demos_dir: str):
             print(f"Error fetching map URL: {e}")
             return None
 
-    def fetch_demo_links(map_name: str):
+        def fetch_demo_links(map_name: str):
         """Fetch all demo URLs for a given map from livesow.net"""
         try:
             r = requests.get(BASE_URL, timeout=30)
@@ -59,8 +59,15 @@ def find_demo_and_map_link(map_name: str, target_time: str, demos_dir: str):
             links = []
             for a in soup.find_all("a", href=True):
                 href = a['href']
-                if href.endswith(".wdz20") and map_name in href:
-                    links.append(BASE_URL + href)
+                # Case-insensitive search for map name in demo files
+                if href.endswith(".wdz20") and map_name.lower() in href.lower():
+                    # Handle both relative and absolute URLs
+                    if href.startswith("http"):
+                        links.append(href)
+                    else:
+                        # Remove leading slash if present to avoid double slashes
+                        href = href.lstrip('/')
+                        links.append(f"{BASE_URL.rstrip('/')}/{href}")
             return links
         except requests.RequestException as e:
             print(f"Error fetching demo links: {e}")
@@ -1211,6 +1218,7 @@ with open("token.txt") as file:
     token = file.read()
 
 bot.run(token)
+
 
 
 
