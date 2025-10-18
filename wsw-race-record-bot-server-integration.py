@@ -146,19 +146,19 @@ def find_demo_and_map_link(map_name: str, target_time: str, demos_dir: str,
         return False, None
 
     # helpers to format times so filename does not contain illegal chars
-    def time_to_seconds_str(t: str):
+        def time_to_seconds_str(t: str):
         # Converts "MM:SS.xxx" or "SS.xxx" or "MM:SS" to "total_seconds.xxx"
         if not t:
             return "unknown"
         parts = t.split(':')
         try:
             if len(parts) == 1:
-                return f"{float(parts[0]):.3f}".rstrip('0').rstrip('.')
+                return f"{float(parts[0]):.3f}"
             else:
                 mins = int(parts[0])
                 secs = float(parts[1])
                 total = mins * 60 + secs
-                return f"{total:.3f}".rstrip('0').rstrip('.')
+                return f"{total:.3f}"
         except Exception:
             # fallback: replace colon with dot
             return t.replace(':', '.')
@@ -1337,5 +1337,6 @@ async def list_channels(ctx):
 
 with open("token.txt") as file:
     token = file.read()
+
 
 bot.run(token)
