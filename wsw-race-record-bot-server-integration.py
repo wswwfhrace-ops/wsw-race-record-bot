@@ -1,44 +1,43 @@
 import sqlite3
-import os
-import shutil
-import time
-
-from datetime import datetime
-
+import configparser
+import json
 from urllib.parse import quote
 import requests
-import subprocess
-
+import os
+import shutil
+from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 import gzip, sys, struct, io, re
 
-RECORD_CHANNELS = [
-    1387767813325721661,  # Your main server channel
-    1342037348761862195,  # Add more channel IDs here for other servers
-]
+config = configparser.ConfigParser()
+config.read('config.cfg')
 
-ERROR_LOG_CHANNEL = 1421923420836331531
+server_url = config.get('Settings', 'server_url')
+
+RECORD_CHANNELS = json.loads(config.get("RECORD_CHANNELS","CHANNELS"))
+
+ERROR_LOG_CHANNEL = config.getint('Settings', 'ERROR_LOG_CHANNEL')
 
 # URL of your SQLite file
-url = "http://livesow.net/race/api/db.sqlite"
-
+url = config.get('Settings', 'url')
+server_url = config.get('Settings', 'server_url')
 # Output file name
-output_path = "C:\\Users\\test\\Desktop\\Warsow Server Records\\.hrace_record_bot\\db.sqlite"
+new_db_path = config.get('Settings', 'new_db_path')
 
 changes = []
 
-
+pending_error_message = None
 # Download the file
 
 from datetime import datetime
 import string
 
 def find_demo_and_map_link(map_name: str, target_time: str, demos_dir: str,
-                           server_url: str = "http://localhost:8000",
+                           server_url: str ,
                            record_update: dict | None = None):
     # ---------------- CONFIG ----------------
-    BASE_URL = "http://livesow.net/race/demos/"
-    MAPLIST_URL = "http://livesow.net/race/maplist.php"
+    BASE_URL = config.get('Settings', 'BASE_URL')
+    MAPLIST_URL = config.get('Settings', 'MAPLIST_URL')
 
     # helper to sanitize filenames (remove characters Windows/Unix don't like)
     INVALID_CHARS = '<>:"/\\|?*'
@@ -146,7 +145,7 @@ def find_demo_and_map_link(map_name: str, target_time: str, demos_dir: str,
         return False, None
 
     # helpers to format times so filename does not contain illegal chars
-        def time_to_seconds_str(t: str):
+    def time_to_seconds_str(t: str):
         # Converts "MM:SS.xxx" or "SS.xxx" or "MM:SS" to "total_seconds.xxx"
         if not t:
             return "unknown"
@@ -306,14 +305,14 @@ def checkforupdates():
 
     response = requests.get(url)
     if response.status_code == 200:
-        with open(output_path, "wb") as f:
+        with open(new_db_path, "wb") as f:
             f.write(response.content)
         print("SQLite file downloaded successfully.")
     else:
         print(f"Failed to download file. Status code: {response.status_code}")
 
-    new_db = "db.sqlite"
-    old_db = "main_db.sqlite"
+    new_db = config.get('Settings', 'new_db_path')
+    old_db = config.get('Settings', 'main_db_path')
 
     # Connect to databases
     cnew = sqlite3.connect(new_db)
@@ -534,46 +533,62 @@ def checkforupdates():
                     # new_record format: (version_id, player_id, map_id, time, version_rank, global_rank, record_type)
                     version_id, player_id, map_id_from_record, time, version_rank, global_rank, _ = new_record
 
-                    # Check if we've already processed this exact record
-                    record_key = (player_id, map_id, time)
+                    # Use the record's map_id for dedup keys (safer) and avoid re-processing same (player,map,time)
+                    record_key = (player_id, map_id_from_record, time)
                     if record_key in processed_records:
                         print(f"Skipping duplicate record: {record_key}")
                         continue
                     processed_records.add(record_key)
 
-                    # Skip records that were pushed down or are not actual improvements
+                    # If this change was an 'updated' type, extract the old record info safely
+                    old_version_id = old_player_id = old_map_id = old_time = old_version_rank = old_global_rank = None
                     if change_type == 'updated' and old_record:
-                        old_version_id, old_player_id, old_map_id, old_time, old_version_rank, old_global_rank, _ = old_record
+                        try:
+                            old_version_id, old_player_id, old_map_id, old_time, old_version_rank, old_global_rank, _ = old_record
+                        except Exception:
+                            old_version_id = old_player_id = old_map_id = old_time = old_version_rank = old_global_rank = None
 
-                        # If this is the same player/time but moved to a worse rank, skip it (was pushed down)
-                        if (player_id == old_player_id and time == old_time and
-                                ((record_type == 'global_2' and old_global_rank == 1) or
-                                 (record_type == 'local_2' and old_version_rank == 1))):
-                            print(
-                                f"Skipping pushed-down record: {player_name} moved from rank {old_global_rank} to rank {global_rank}")
-                            continue
-
-                        # Skip if it's a worse time taking over a rank (shouldn't happen but just in case)
-                        if time > old_time:
-                            print(
-                                f"Skipping worse time: {format_race_time(time)} vs previous {format_race_time(old_time)}")
-                            continue
-
-                        # Skip global_2 changes where the "new" record was actually pushed down from global_1
-                        # Check if this player/time combination was the old global_1
-                        if record_type == 'global_2':
-                            # Look for this exact player/time in the old global_1 slot
-                            old_global_1 = None
-                            for old_change in map_changes:
-                                if len(old_change) > 3 and old_change[1] == 'global_1':
-                                    old_global_1_record = old_change[3]  # old record from global_1 change
-                                    if (old_global_1_record[1] == player_id and  # same player
-                                            old_global_1_record[3] == time):  # same time
-                                        print(f"Skipping global_2 - this was the old global_1 that got pushed down")
-                                        old_global_1 = True
-                                        break
-                            if old_global_1:
+                        # If same player & same time moved to a worse rank (e.g. local_1 -> local_2 or global_1 -> global_2) skip
+                        if old_player_id is not None and old_time is not None:
+                            if (player_id == old_player_id and time == old_time and
+                                    ((record_type == 'global_2' and old_global_rank == 1) or
+                                     (record_type == 'local_2' and old_version_rank == 1))):
+                                print(f"Skipping pushed-down record: player {player_id} time {time} moved down.")
                                 continue
+
+                    # Additional: new_record might be an old record from a different slot in this same set of map_changes
+                    # Example: old local_1 -> new local_2 (same player+time). Detect by scanning map_changes' old entries
+                    pushed_down_found = False
+                    if record_type in ('local_2', 'global_2'):
+                        for old_change in map_changes:
+                            if len(old_change) > 3:
+                                old_type = old_change[1]
+                                old_rec = old_change[3]
+                                # old_rec layout is (version_id, player_id, map_id, time, version_rank, global_rank, record_type)
+                                try:
+                                    old_rec_player = old_rec[1]
+                                    old_rec_time = old_rec[3]
+                                except Exception:
+                                    continue
+                                if old_rec_player == player_id and old_rec_time == time:
+                                    # if the previous slot was the higher slot (local_1 or global_1), skip this pushed-down entry
+                                    if (record_type == 'global_2' and old_type == 'global_1') or \
+                                            (record_type == 'local_2' and old_type == 'local_1'):
+                                        print(f"Skipping {record_type} because it is the old {old_type} pushed down.")
+                                        pushed_down_found = True
+                                        break
+                    if pushed_down_found:
+                        continue
+
+                    # If time got worse compared to the immediate old_record, skip too (safety)
+                    if change_type == 'updated' and old_record and old_time is not None:
+                        try:
+                            if time > old_time:
+                                print(
+                                    f"Skipping worse time: {format_race_time(time)} vs previous {format_race_time(old_time)}")
+                                continue
+                        except Exception:
+                            pass
 
                     # Check if this exact time existed before for this map/version
                     time_already_existed = False
@@ -664,15 +679,13 @@ def checkforupdates():
 
                     # Get demo and map links
                     if record_update['type']:  # Only if we have a valid record type
-                        script_dir = os.path.dirname(os.path.abspath(__file__))
-                        DEMOS_DIR = os.path.join(script_dir, 'demos')
-
+                        DEMOS_DIR = config.get('Settings', 'demos_output_path')
                         print(f"Starting search for map: {map_name} with time: {formatted_time}")
 
                         try:
                             # call the demo finder and unpack safely (supports 3- or 4-item returns)
                             result = find_demo_and_map_link(map_name, formatted_time, DEMOS_DIR,
-                                                            server_url="http://localhost:8000",
+                                                            server_url=config.get('Settings', 'server_url'),
                                                             record_update=record_update)
 
                             map_link = demo_link = server_time = demo_path = None
@@ -690,8 +703,9 @@ def checkforupdates():
                             # If neither a public URL (demo_link) nor a local file (demo_path exists) are present,
                             # then the demo isn't available yet — abort the cycle.
                             if not demo_link and not (demo_path and os.path.exists(demo_path)):
-                                print(
-                                    f"Demo not available yet for {map_name} ({formatted_time}) — will skip this cycle.")
+                                print(f"Demo not available yet for {map_name} ({formatted_time}) — will skip this cycle.")
+                                global pending_error_message
+                                pending_error_message = f"@here Demo not available yet for {map_name} ({formatted_time})."
                                 missing_demo = True
                                 break
 
@@ -738,7 +752,6 @@ def checkforupdates():
     print("New database has replaced old database.")
 
     return record_updates
-
 
 import discord
 from discord.ext import commands, tasks
@@ -967,7 +980,6 @@ async def send_batched_logs():
             # Send header first
             await error_channel.send(f"```\n{header}\n```")
             await asyncio.sleep(10)  # 10 second delay after header
-            time.sleep((10))
 
             # Split the log content
             lines = log_text.split('\n')
@@ -1108,7 +1120,7 @@ async def on_ready():
     if ERROR_LOG_CHANNEL:
         print(f"Error logging enabled for channel {ERROR_LOG_CHANNEL}")
     auto_check.start()  # start the background loop when the bot is ready
-
+    backup_database.start()
 
 @bot.command()
 async def update(ctx):
@@ -1145,12 +1157,19 @@ async def update(ctx):
         await log_error(f"Error in manual update command", e)
 
 
-@tasks.loop(minutes=60)  # change 60 to however many minutes you want
+@tasks.loop(minutes= config.getint('Settings', 'poll_rate'))  # change 60 to however many minutes you want
 async def auto_check():
     global last_embed_messages
 
     try:
         record_updates = checkforupdates()
+
+        if pending_error_message:
+            error_channel = bot.get_channel(ERROR_LOG_CHANNEL)
+            if error_channel:
+                await error_channel.send(pending_error_message)
+            print("⏭️ Skipping due to missing demo.")
+            return
 
         # Only send/update if there are actual updates
         if record_updates:
@@ -1246,97 +1265,32 @@ async def embed_info(ctx):
     else:
         await ctx.send("❌ No embed messages currently tracked.")
 
+DB_PATH = config.get('Settings', 'main_db_path')
 
-# Add command to test console output (batched)
-@bot.command()
-async def test_console(ctx):
-    """Test that console outputs are being batched and sent to error channel"""
-    print("🧪 This is a test info message 1")
-    print("✅ This is a test info message 2")
-    print("ℹ️ This is a test info message 3")
-    print("❌ This is a test error message with keyword 'error'")
-    print("⚠️ Demo not available for testing - this should trigger error detection")
-    print("🚨 Another error message")
-    print("📊 Processing complete")
-    await ctx.send("✅ Test messages sent! They will be batched and appear in error channel within ~5 seconds.")
+# Define where you want to store your backups
+BACKUP_DIR = config.get('BACKUP', 'backup_dir')
+import datetime,time
+backup_interval_hours = config.getint('BACKUP', 'backup_interval_hours')
+max_backup_days = config.getint('BACKUP', 'max_backup_days')
+@tasks.loop(hours=backup_interval_hours)  # Run every 72 hours (3 days)
+async def backup_database():
+    # Generate a timestamp for the backup filename
+    timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    backup_filename = f"backup_{timestamp}.sqlite"
+    backup_path = os.path.join(BACKUP_DIR, backup_filename)
 
+    # Perform the database backup (copy the database file)
+    try:
+        shutil.copy(DB_PATH, backup_path)
+        print(f"Backup successful: {backup_filename}")
+    except Exception as e:
+        print(f"Error while backing up the database: {e}")
 
-# Add command to force send current batch
-@bot.command()
-async def flush_logs(ctx):
-    """Force send any pending batched logs immediately"""
-    global log_batch
-    if log_batch:
-        await send_batched_logs()
-        await ctx.send(f"✅ Flushed {len(log_batch)} pending log messages to error channel.")
-    else:
-        await ctx.send("ℹ️ No pending log messages to flush.")
-
-
-# Add command to check batch status
-@bot.command()
-async def log_status(ctx):
-    """Check the current logging batch status"""
-    global log_batch
-    await ctx.send(f"📊 Current batch: {len(log_batch)} messages pending")
-
-
-# Add command to test error logging (immediate)
-@bot.command()
-async def test_error(ctx):
-    await log_error("🧪 Test Error", "This is a test error to verify immediate error logging is working.")
-    await ctx.send("✅ Test error sent immediately to error log channel!")
-
-
-# Add command to test demo not found scenario
-@bot.command()
-async def test_demo_missing(ctx):
-    print("🎥 Demo not available yet; skipping this cycle without updating or posting.")
-    print("❌ Failed to find demo for map test-map with time 00:12.345")
-    print("⚠️ Retrying in next update cycle")
-    await ctx.send("✅ Demo missing messages sent! Will be batched and sent to error channel.")
-
-
-# Add command to add/remove channels
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def add_channel(ctx, channel_id: int):
-    if channel_id not in RECORD_CHANNELS:
-        RECORD_CHANNELS.append(channel_id)
-        await ctx.send(f"✅ Added channel {channel_id} to record updates list.")
-    else:
-        await ctx.send(f"❌ Channel {channel_id} is already in the list.")
-
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def remove_channel(ctx, channel_id: int):
-    if channel_id in RECORD_CHANNELS:
-        RECORD_CHANNELS.remove(channel_id)
-        if channel_id in last_embed_messages:
-            del last_embed_messages[channel_id]
-        await ctx.send(f"✅ Removed channel {channel_id} from record updates list.")
-    else:
-        await ctx.send(f"❌ Channel {channel_id} is not in the list.")
-
-
-@bot.command()
-async def list_channels(ctx):
-    if RECORD_CHANNELS:
-        channel_list = "📋 **Record Update Channels:**\n"
-        for i, channel_id in enumerate(RECORD_CHANNELS, 1):
-            channel = bot.get_channel(channel_id)
-            if channel:
-                channel_list += f"{i}. {channel.guild.name}#{channel.name} ({channel_id})\n"
-            else:
-                channel_list += f"{i}. Channel {channel_id} (not accessible)\n"
-        await ctx.send(channel_list[:2000])
-    else:
-        await ctx.send("❌ No channels configured for record updates.")
-
-
-with open("token.txt") as file:
-    token = file.read()
-
-
+    for filename in os.listdir(BACKUP_DIR):
+        file_path = os.path.join(BACKUP_DIR, filename)
+        file_creation_time = os.path.getctime(file_path)
+        # If the file is older than 30 days, delete it
+        if (time.time() - file_creation_time) > max_backup_days * 86400:
+            os.remove(file_path)
+token = config.get('Settings', 'token')
 bot.run(token)
