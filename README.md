@@ -1,12 +1,18 @@
 # wsw-race-record-bot
 
+Update the config file.
+The error channel is to help me check what went wrong.
 
-Remember to change the channel id and the output_path.
-Dont change my channel id or the errorlog channel id. it is to check if it is working fine
-
-One will also need to add the token.txt file themselves
-
-Run the program once. It will download a db.sqlite file. and the code will get stuck somewhere. Just end the program and rename the db.sqlite file to main_db.sqlite
+File structure
+wsw-race-record-bot/    
+  ├──wsw-race-record-bot-server-integration.py
+  ├──config.cfg 
+  └──demos/       
+      ├── (contains demos)
+      └── Backup_DBs/ (main_db and backups)
+      
+Run the program for the first time. There will be an error. There will be 3 files created in the Backup_DBs' folder. only keep the db.sqlite file.
+Rename it to main_db.sqlite and rerun the program.
 
 Most of the code was written by Ai.
 
