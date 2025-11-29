@@ -1138,24 +1138,7 @@ async def update(ctx):
 
         channel_id = ctx.channel.id
 
-        if channel_id in last_embed_messages:
-            try:
-                # Try to edit the existing message with new embeds
-                await last_embed_messages[channel_id].edit(embeds=embeds)
-                await ctx.send("✅ Updated existing embed with new records!")
-            except discord.NotFound:
-                # Message was deleted, send a new one
-                last_embed_messages[channel_id] = await ctx.send(embeds=embeds)
-                await ctx.send("✅ Sent new embeds (previous message not found)!")
-            except discord.HTTPException as e:
-                # Some other error, send a new message
-                await log_error(f"Error editing embed in channel {channel_id}", e)
-                last_embed_messages[channel_id] = await ctx.send(embeds=embeds)
-                await ctx.send("✅ Sent new embeds due to edit error!")
-        else:
-            # No previous message, send a new one
-            last_embed_messages[channel_id] = await ctx.send(embeds=embeds)
-            await ctx.send("✅ Sent new embeds!")
+        last_embed_messages[channel_id] = await ctx.send(embeds=embeds)
 
     except Exception as e:
         await ctx.send(f"❌ Error occurred: {e}")
