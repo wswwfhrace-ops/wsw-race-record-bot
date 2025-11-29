@@ -1,13 +1,18 @@
-import sqlite3
 import configparser
+import gzip
+import io
 import json
-from urllib.parse import quote
-import requests
 import os
+import re
 import shutil
+import sqlite3
+import struct
+import sys
 from datetime import datetime, timedelta
+from urllib.parse import quote
+
+import requests
 from bs4 import BeautifulSoup
-import gzip, sys, struct, io, re
 
 config = configparser.ConfigParser()
 config.read('config.cfg')
@@ -1162,6 +1167,7 @@ async def auto_check():
     global last_embed_messages
 
     try:
+        pending_error_message = None
         record_updates = checkforupdates()
 
         if pending_error_message:
