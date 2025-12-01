@@ -1178,29 +1178,10 @@ async def auto_check():
                     continue
 
                 try:
-                    if channel_id in last_embed_messages:
-                        try:
-                            # Try to edit the existing message with new embeds
-                            await last_embed_messages[channel_id].edit(embeds=embeds)
-                            print(f"✅ Updated existing embeds in {channel.guild.name}#{channel.name}")
-                            successful_updates += 1
-                        except discord.NotFound:
-                            # Message was deleted, send a new one
-                            last_embed_messages[channel_id] = await channel.send(embeds=embeds)
-                            print(
-                                f"✅ Sent new embeds in {channel.guild.name}#{channel.name} (previous message not found)")
-                            successful_updates += 1
-                        except discord.HTTPException as e:
-                            # Some other error, send a new message
-                            await log_error(f"Error editing message in {channel.guild.name}#{channel.name}", e)
-                            last_embed_messages[channel_id] = await channel.send(embeds=embeds)
-                            print(f"✅ Sent new embeds in {channel.guild.name}#{channel.name} due to edit error")
-                            successful_updates += 1
-                    else:
-                        # No previous message, send a new one
-                        last_embed_messages[channel_id] = await channel.send(embeds=embeds)
-                        print(f"✅ Sent new embeds in {channel.guild.name}#{channel.name} (no previous message)")
-                        successful_updates += 1
+                    # No previous message, send a new one
+                    last_embed_messages[channel_id] = await channel.send(embeds=embeds)
+                    print(f"✅ Sent new embeds in {channel.guild.name}#{channel.name} (no previous message)")
+                    successful_updates += 1
 
                 except discord.Forbidden:
                     await log_error(f"No permission to send messages in {channel.guild.name}#{channel.name}")
@@ -1283,3 +1264,4 @@ async def backup_database():
             os.remove(file_path)
 token = config.get('Settings', 'token')
 bot.run(token)
+
