@@ -32,6 +32,7 @@ new_db_path = config.get('Settings', 'new_db_path')
 changes = []
 
 pending_error_message = None
+
 # Download the file
 
 from datetime import datetime
@@ -306,6 +307,9 @@ def format_race_time(ms):
 
 
 def checkforupdates():
+    global pending_error_message
+    pending_error_message = None
+
     changes = []
 
     response = requests.get(url)
@@ -709,8 +713,9 @@ def checkforupdates():
                             # then the demo isn't available yet — abort the cycle.
                             if not demo_link and not (demo_path and os.path.exists(demo_path)):
                                 print(f"Demo not available yet for {map_name} ({formatted_time}) — will skip this cycle.")
-                                global pending_error_message
-                                pending_error_message = f"@here Demo not available yet for {map_name} ({formatted_time})."
+
+                                pending_error_message = f"@here Demo not available yet for {map_name} ({formatted_time})"
+
                                 missing_demo = True
                                 break
 
@@ -1127,29 +1132,28 @@ async def on_ready():
     auto_check.start()  # start the background loop when the bot is ready
     backup_database.start()
 
-@bot.command()
-async def update(ctx):
-    """Manual update: always posts a NEW embed to the invoking channel (even if there are no new records)."""
+@bot.command(name='update')
+async def manual_update(ctx):
     await ctx.send("🔄 Checking for updates...")
-    try:
-        record_updates = checkforupdates()
-        embeds = create_records_embeds(record_updates)
 
-        # If create_records_embeds returned an empty list, send a minimal informative embed
-        if not embeds:
-            # fallback embed if there's nothing to show
-            fallback = discord.Embed(title="No new records", description=f"Checked at {datetime.now().isoformat()}")
-            embeds = [fallback]
+    record_updates = checkforupdates()
 
-        # Always send a new message (do not attempt to edit)
-        sent_msg = await ctx.send(embeds=embeds)
-        # keep tracking the last message if other commands rely on it
-        last_embed_messages[ctx.channel.id] = sent_msg
+    if not record_updates:
+        await ctx.send("ℹ️ No new records found.")
+        return
 
-        #await ctx.send("✅ Sent new embeds!")
-    except Exception as e:
-        await ctx.send(f"❌ Error occurred: {e}")
-        await log_error("Error in manual update command", e)
+    embeds = create_records_embeds(record_updates)
+
+    # Send to ALL record channels
+    successful = 0
+    for channel_id in RECORD_CHANNELS:
+        channel = bot.get_channel(channel_id)
+        if channel:
+            await channel.send(embeds=embeds)
+            successful += 1
+
+    #await ctx.send(f"✅ Sent updates to {successful} configured channels.")
+
 
 
 
@@ -1166,7 +1170,6 @@ async def auto_check():
 
         # If checkforupdates set any pending error message handling elsewhere, keep existing behavior
         # (if you have code that sets pending_error_message, adapt here; using None keeps compatibility)
-        pending_error_message = None
         if pending_error_message:
             error_channel = bot.get_channel(ERROR_LOG_CHANNEL)
             if error_channel:
