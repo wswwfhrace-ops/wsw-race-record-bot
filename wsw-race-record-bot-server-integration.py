@@ -272,7 +272,7 @@ def find_demo_and_map_link(map_name: str, target_time: str, demos_dir: str,
             # Build the public URL that points to your server
             # encode the pretty filename when building the public URL
             encoded_pretty = quote(pretty_name, safe='')
-            found_demo_url = f"{server_url.rstrip('/')}/demos/{encoded_pretty}"
+            found_demo_url = f"{server_url.rstrip('/')}/{encoded_pretty}"
             server_time = time_start
 
             print(f"  Demo public URL (constructed): {found_demo_url}")
@@ -1129,30 +1129,44 @@ async def on_ready():
 
 @bot.command()
 async def update(ctx):
-    global last_embed_messages
-
+    """Manual update: always posts a NEW embed to the invoking channel (even if there are no new records)."""
     await ctx.send("🔄 Checking for updates...")
     try:
         record_updates = checkforupdates()
         embeds = create_records_embeds(record_updates)
 
-        channel_id = ctx.channel.id
+        # If create_records_embeds returned an empty list, send a minimal informative embed
+        if not embeds:
+            # fallback embed if there's nothing to show
+            fallback = discord.Embed(title="No new records", description=f"Checked at {datetime.now().isoformat()}")
+            embeds = [fallback]
 
-        last_embed_messages[channel_id] = await ctx.send(embeds=embeds)
+        # Always send a new message (do not attempt to edit)
+        sent_msg = await ctx.send(embeds=embeds)
+        # keep tracking the last message if other commands rely on it
+        last_embed_messages[ctx.channel.id] = sent_msg
 
+        #await ctx.send("✅ Sent new embeds!")
     except Exception as e:
         await ctx.send(f"❌ Error occurred: {e}")
-        await log_error(f"Error in manual update command", e)
+        await log_error("Error in manual update command", e)
 
 
-@tasks.loop(minutes= config.getint('Settings', 'poll_rate'))  # change 60 to however many minutes you want
+
+
+@tasks.loop(minutes=config.getint('Settings', 'poll_rate'))
 async def auto_check():
+    """Auto-check loop: only posts NEW embeds when there are actual new record updates.
+       Never edits existing messages (always sends new messages when posting)."""
     global last_embed_messages
 
     try:
-        pending_error_message = None
+        # run the updater to detect new records
         record_updates = checkforupdates()
 
+        # If checkforupdates set any pending error message handling elsewhere, keep existing behavior
+        # (if you have code that sets pending_error_message, adapt here; using None keeps compatibility)
+        pending_error_message = None
         if pending_error_message:
             error_channel = bot.get_channel(ERROR_LOG_CHANNEL)
             if error_channel:
@@ -1160,48 +1174,46 @@ async def auto_check():
             print("⏭️ Skipping due to missing demo.")
             return
 
-        # Only send/update if there are actual updates
-        if record_updates:
-            embeds = create_records_embeds(record_updates)
-
-            # Send to all configured channels
-            successful_updates = 0
-            failed_updates = 0
-
-            for channel_id in RECORD_CHANNELS:
-                channel = bot.get_channel(channel_id)
-
-                if channel is None:
-                    await log_error(
-                        f"Channel {channel_id} not found. Bot may not be in that server or lacks permissions.")
-                    failed_updates += 1
-                    continue
-
-                try:
-                    # No previous message, send a new one
-                    last_embed_messages[channel_id] = await channel.send(embeds=embeds)
-                    print(f"✅ Sent new embeds in {channel.guild.name}#{channel.name} (no previous message)")
-                    successful_updates += 1
-
-                except discord.Forbidden:
-                    await log_error(f"No permission to send messages in {channel.guild.name}#{channel.name}")
-                    failed_updates += 1
-                except Exception as e:
-                    await log_error(f"Unexpected error sending to {channel.guild.name}#{channel.name}", e)
-                    failed_updates += 1
-
-            # Log summary
-            total_records = len(record_updates)
-            summary = f"📊 Update Summary: {total_records} new records sent to {successful_updates}/{len(RECORD_CHANNELS)} channels"
-            if failed_updates > 0:
-                summary += f" ({failed_updates} failed)"
-            print(summary)
-
-            if failed_updates > 0:
-                await log_error(summary)
-
-        else:
+        # Only proceed when there are actual updates
+        if not record_updates:
             print("ℹ️ No new records found")
+            return
+
+        # Build embeds and post fresh messages (no edits)
+        embeds = create_records_embeds(record_updates)
+
+        successful_updates = 0
+        failed_updates = 0
+
+        for channel_id in RECORD_CHANNELS:
+            channel = bot.get_channel(channel_id)
+            if channel is None:
+                await log_error(f"Channel {channel_id} not found. Bot may not be in that server or lacks permissions.")
+                failed_updates += 1
+                continue
+
+            try:
+                sent_msg = await channel.send(embeds=embeds)
+                # store last sent message if other parts of the bot need it
+                last_embed_messages[channel_id] = sent_msg
+                print(f"✅ Sent new embeds in {channel.guild.name}#{channel.name}")
+                successful_updates += 1
+
+            except discord.Forbidden:
+                await log_error(f"No permission to send messages in {channel.guild.name}#{channel.name}")
+                failed_updates += 1
+            except Exception as e:
+                await log_error(f"Unexpected error sending to {channel.guild.name}#{channel.name}", e)
+                failed_updates += 1
+
+        # summary/log
+        total_records = len(record_updates)
+        summary = f"📊 Update Summary: {total_records} new records sent to {successful_updates}/{len(RECORD_CHANNELS)} channels"
+        if failed_updates > 0:
+            summary += f" ({failed_updates} failed)"
+        print(summary)
+        if failed_updates > 0:
+            await log_error(summary)
 
     except Exception as e:
         error_msg = f"Critical error in auto_check: {str(e)}"
@@ -1264,4 +1276,3 @@ async def backup_database():
             os.remove(file_path)
 token = config.get('Settings', 'token')
 bot.run(token)
-
