@@ -7,15 +7,34 @@ import re
 import shutil
 import sqlite3
 import struct
-import sys
-from datetime import datetime, timedelta
 from urllib.parse import quote
-
+import threading
+import traceback
 import requests
+import time
 from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
+import discord
+from discord.ext import commands, tasks
+import asyncio
 
 config = configparser.ConfigParser()
 config.read('config.cfg')
+
+try:
+    LOG_DIR = config.get('Logging', 'log_dir')
+except Exception:
+    LOG_DIR = os.path.join(os.path.dirname(__file__), 'logs')
+
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# Main log files
+LOG_FILE = os.path.join(LOG_DIR, 'bot.log')             # info / general logs
+ERROR_LOG_FILE = os.path.join(LOG_DIR, 'bot_errors.log')# error / exception logs
+
+# Lock for thread-safe file writes (used by sync and async callers)
+_log_write_lock = threading.Lock()
+
 
 server_url = config.get('Settings', 'server_url')
 
@@ -35,8 +54,8 @@ pending_error_message = None
 
 # Download the file
 
-from datetime import datetime
-import string
+
+
 
 def find_demo_and_map_link(map_name: str, target_time: str, demos_dir: str,
                            server_url: str ,
@@ -763,9 +782,7 @@ def checkforupdates():
 
     return record_updates
 
-import discord
-from discord.ext import commands, tasks
-import asyncio
+
 
 bot = commands.Bot(command_prefix='!', intents=discord.Intents.all())
 
@@ -947,81 +964,40 @@ batch_timer = None
 
 
 async def send_batched_logs():
-    """Send all batched log messages as plain text messages with aggressive delays"""
-    global log_batch, _bot_instance
-
-    if not log_batch or not _bot_instance:
+    """
+    Keep this async so other code that awaited it still works.
+    Writes any pending batched logs to the log files (does NOT send to Discord).
+    """
+    global log_batch
+    if not log_batch:
         return
 
-    error_channel = _bot_instance.get_channel(ERROR_LOG_CHANNEL)
-    if not error_channel:
-        original_print("Error channel not found for batch logging")
-        log_batch.clear()
-        return
-
+    # Write each entry into files depending on is_error flag stored with the entry.
+    # Expecting log_batch to be list of tuples or strings depending on your earlier implementation.
+    # We'll support both: if an entry contains '❌' or 'error' we'll treat as error, otherwise info.
     try:
-        # Create header with timestamp and summary
-        errors = [msg for msg in log_batch if msg['is_error']]
-        total_messages = len(log_batch)
-        error_count = len(errors)
+        # Move batch to local variable quickly
+        with _log_write_lock:
+            batch_copy = list(log_batch)
+            log_batch.clear()
 
-        # Create one big message with all logs
-        header = f"📊 **Bot Activity Log** - {discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
-        header += f"Total: {total_messages} messages ({error_count} errors)\n"
-        header += "─" * 50 + "\n"
+        for entry in batch_copy:
+            # If entry is a tuple like (message, is_error) - support that
+            if isinstance(entry, (list, tuple)) and len(entry) >= 1:
+                msg = str(entry[0])
+                is_err = bool(entry[1]) if len(entry) > 1 else ('error' in msg.lower() or '❌' in msg)
+            else:
+                msg = str(entry)
+                is_err = ('error' in msg.lower() or '❌' in msg)
 
-        # Add all messages in chronological order
-        log_text = ""
-        for msg in log_batch:
-            timestamp = msg['timestamp'].strftime('%H:%M:%S')
-            prefix = "🚨" if msg['is_error'] else "ℹ️"
-            log_text += f"[{timestamp}] {prefix} {msg['content']}\n"
-
-        full_message = header + log_text
-
-        # Split into multiple messages if too long (Discord limit is 2000 characters)
-        max_length = 1700  # Even more conservative buffer
-
-        if len(full_message) <= max_length:
-            # Single message
-            await error_channel.send(f"```\n{full_message}\n```")
-        else:
-            # Split into multiple messages with VERY long delays
-            # Send header first
-            await error_channel.send(f"```\n{header}\n```")
-            await asyncio.sleep(10)  # 10 second delay after header
-
-            # Split the log content
-            lines = log_text.split('\n')
-            current_chunk = ""
-            chunk_number = 1
-
-            for line in lines:
-                # Check if adding this line would exceed the limit
-                test_chunk = current_chunk + line + "\n"
-                if len(test_chunk) > max_length and current_chunk:
-                    # Send current chunk
-                    chunk_header = f"📄 Part {chunk_number}:\n" + "─" * 20 + "\n"
-                    await error_channel.send(f"```\n{chunk_header}{current_chunk}\n```")
-                    await asyncio.sleep(15)  # 15 second delay between parts!!
-                    current_chunk = line + "\n"
-                    chunk_number += 1
-                else:
-                    current_chunk = test_chunk
-
-            # Send final chunk if any content remains
-            if current_chunk.strip():
-                chunk_header = f"📄 Part {chunk_number}:\n" + "─" * 20 + "\n"
-                await error_channel.send(f"```\n{chunk_header}{current_chunk}\n```")
-
+            if is_err:
+                write_log_file(ERROR_LOG_FILE, msg, level='ERROR')
+            else:
+                write_log_file(LOG_FILE, msg, level='INFO')
     except Exception as e:
-        # Fallback to console if Discord fails
-        original_print(f"Failed to send batched logs: {e}")
-        for msg in log_batch:
-            original_print(f"[BATCH] {msg['content']}")
+        # If something goes wrong, fallback to writing the traceback to ERROR_LOG_FILE
+        write_log_file(ERROR_LOG_FILE, f"send_batched_logs exception: {e}\n{traceback.format_exc()}", level='ERROR')
 
-    # Clear the batch
-    log_batch.clear()
 
 
 def schedule_batch_send():
@@ -1047,55 +1023,58 @@ def schedule_batch_send():
 
 
 async def log_error(message, error=None, is_info=False):
-    """Log critical errors immediately (bypasses batching for important errors)"""
-    if not _bot_instance:
-        original_print(f"Bot not ready for logging: {message}")
-        return
-
-    error_channel = _bot_instance.get_channel(ERROR_LOG_CHANNEL)
-    if error_channel:
-        timestamp = discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-        prefix = "ℹ️ INFO" if is_info else "🚨 CRITICAL ERROR"
-
-        log_message = f"**{prefix}** - {timestamp} UTC\n"
-        log_message += f"```\n{message}\n"
-
-        if error and not is_info:
-            log_message += f"\nError Details:\n{str(error)[:500]}\n"
-
-        log_message += "```"
-
-        try:
-            await error_channel.send(log_message)
-        except Exception as e:
-            original_print(f"Failed to send critical error log: {e}")
-    else:
-        original_print(f"Error channel not found. Message: {message}")
-
-
-def log_to_discord_batch(message, is_error=False):
-    """Add message to batch for later sending"""
-    global log_batch
-
-    # Add to batch
-    log_batch.append({
-        'content': message,
-        'is_error': is_error,
-        'timestamp': discord.utils.utcnow()
-    })
-
-    # Schedule batch sending
-    schedule_batch_send()
-
-    # If batch gets very large, send immediately to avoid memory issues
-    if len(log_batch) >= 100:  # Much higher threshold
-        if _bot_instance:
-            import asyncio
+    """
+    Record an error message to the error log file (async-compatible).
+    Previously this sent to a Discord channel. Now it writes to ERROR_LOG_FILE.
+    """
+    try:
+        # Create a suitable text for the log
+        if error:
+            err_text = f"{message} - Error: {repr(error)}"
             try:
-                loop = asyncio.get_event_loop()
-                loop.create_task(send_batched_logs())
-            except:
+                # If it's an exception, include full traceback
+                tb = traceback.format_exc()
+                if tb and "NoneType" not in tb:  # avoid printing NoneType trace when not available
+                    err_text = f"{err_text}\n{tb}"
+            except Exception:
                 pass
+        else:
+            err_text = str(message)
+
+        # write to error log
+        write_log_file(ERROR_LOG_FILE, err_text, level='ERROR')
+
+        # Also add to batched in-memory log (keeps existing behavior)
+        with _log_write_lock:
+            log_batch.append((err_text, True))
+
+    except Exception as e:
+        # As a last resort print to console so you can still debug
+        original_print("log_error failed:", e, traceback.format_exc())
+
+
+
+def log_to_discord_batch(message: str, is_error: bool = False):
+    """
+    Previously batched logs for sending to Discord.
+    Now immediately append to the appropriate local log file.
+    """
+    if is_error:
+        write_log_file(ERROR_LOG_FILE, message, level='ERROR')
+    else:
+        write_log_file(LOG_FILE, message, level='INFO')
+
+def write_log_file(path: str, message: str, level: str = 'INFO'):
+    """Thread-safe append of message to `path` with timestamp."""
+    timestamp = datetime.utcnow().isoformat() + "Z"
+    entry = f"{timestamp} [{level}] {message}\n"
+    try:
+        with _log_write_lock:
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(entry)
+    except Exception:
+        # If writing fails, fallback to console to avoid silent failure
+        original_print("Failed to write log to file:", path, traceback.format_exc())
 
 
 # Custom print function that batches messages
@@ -1103,17 +1082,29 @@ original_print = print
 
 
 def discord_print(*args, **kwargs):
-    """Replace print to send output to both console and Discord (batched)"""
+    """Replace print to send output to both console and the local log file."""
     # Print to console as normal
     original_print(*args, **kwargs)
 
-    # Also add to Discord batch
-    if args and _bot_instance:
+    # Also write to log file
+    try:
         message = ' '.join(str(arg) for arg in args)
         # Determine if this looks like an error
         error_keywords = ['error', 'failed', 'exception', 'critical', 'missing demo', '❌', '🚨', '⚠️']
         is_error = any(keyword in message.lower() for keyword in error_keywords)
-        log_to_discord_batch(message, is_error)
+        if is_error:
+            write_log_file(ERROR_LOG_FILE, message, level='ERROR')
+        else:
+            write_log_file(LOG_FILE, message, level='INFO')
+
+        # Keep batched memory for compatibility (so other code still works)
+        with _log_write_lock:
+            log_batch.append((message, is_error))
+
+    except Exception as e:
+        # fallback
+        original_print("discord_print failed to log:", e, traceback.format_exc())
+
 
 
 # Replace the built-in print function
@@ -1254,13 +1245,13 @@ DB_PATH = config.get('Settings', 'main_db_path')
 
 # Define where you want to store your backups
 BACKUP_DIR = config.get('BACKUP', 'backup_dir')
-import datetime,time
+
 backup_interval_hours = config.getint('BACKUP', 'backup_interval_hours')
 max_backup_days = config.getint('BACKUP', 'max_backup_days')
 @tasks.loop(hours=backup_interval_hours)  # Run every 72 hours (3 days)
 async def backup_database():
     # Generate a timestamp for the backup filename
-    timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     backup_filename = f"backup_{timestamp}.sqlite"
     backup_path = os.path.join(BACKUP_DIR, backup_filename)
 
