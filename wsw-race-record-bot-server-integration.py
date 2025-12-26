@@ -8,9 +8,12 @@ import shutil
 import sqlite3
 import struct
 import sys
+import time
 from datetime import datetime, timedelta
 from urllib.parse import quote
-
+import discord
+from discord.ext import commands, tasks
+import asyncio
 import requests
 from bs4 import BeautifulSoup
 
@@ -33,10 +36,30 @@ changes = []
 
 pending_error_message = None
 
-# Download the file
+# Add after line: new_db_path = config.get('Settings', 'new_db_path')
+LOG_DIR = config.get('LOGGING', 'log_dir')
+current_log_file = None
 
-from datetime import datetime
-import string
+def get_current_log_file():
+    """Get or create the current log file based on today's date"""
+    global current_log_file
+    os.makedirs(LOG_DIR, exist_ok=True)
+    log_filename = f"bot_log_{datetime.now().strftime('%Y-%m-%d')}.txt"
+    log_path = os.path.join(LOG_DIR, log_filename)
+    return log_path
+
+def write_to_log(message):
+    """Write message to the current log file"""
+    try:
+        log_file = get_current_log_file()
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(f"[{timestamp}] {message}\n")
+    except Exception as e:
+        original_print(f"Failed to write to log file: {e}")
+
+
+
 
 def find_demo_and_map_link(map_name: str, target_time: str, demos_dir: str,
                            server_url: str ,
@@ -763,10 +786,6 @@ def checkforupdates():
 
     return record_updates
 
-import discord
-from discord.ext import commands, tasks
-import asyncio
-
 bot = commands.Bot(command_prefix='!', intents=discord.Intents.all())
 
 # Store the last embed message for editing
@@ -938,225 +957,20 @@ def create_records_embeds(record_updates, max_per_embed=4):
 # Store last embed messages for each channel
 last_embed_messages = {}  # channel_id -> message object
 
-# Global reference to the bot for logging
-_bot_instance = None
-
-# Message batching system
-log_batch = []
-batch_timer = None
-
-
-async def send_batched_logs():
-    """Send all batched log messages as plain text messages with aggressive delays"""
-    global log_batch, _bot_instance
-
-    if not log_batch or not _bot_instance:
-        return
-
-    error_channel = _bot_instance.get_channel(ERROR_LOG_CHANNEL)
-    if not error_channel:
-        original_print("Error channel not found for batch logging")
-        log_batch.clear()
-        return
-
-    try:
-        # Create header with timestamp and summary
-        errors = [msg for msg in log_batch if msg['is_error']]
-        total_messages = len(log_batch)
-        error_count = len(errors)
-
-        # Create one big message with all logs
-        header = f"📊 **Bot Activity Log** - {discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
-        header += f"Total: {total_messages} messages ({error_count} errors)\n"
-        header += "─" * 50 + "\n"
-
-        # Add all messages in chronological order
-        log_text = ""
-        for msg in log_batch:
-            timestamp = msg['timestamp'].strftime('%H:%M:%S')
-            prefix = "🚨" if msg['is_error'] else "ℹ️"
-            log_text += f"[{timestamp}] {prefix} {msg['content']}\n"
-
-        full_message = header + log_text
-
-        # Split into multiple messages if too long (Discord limit is 2000 characters)
-        max_length = 1700  # Even more conservative buffer
-
-        if len(full_message) <= max_length:
-            # Single message
-            await error_channel.send(f"```\n{full_message}\n```")
-        else:
-            # Split into multiple messages with VERY long delays
-            # Send header first
-            await error_channel.send(f"```\n{header}\n```")
-            await asyncio.sleep(10)  # 10 second delay after header
-
-            # Split the log content
-            lines = log_text.split('\n')
-            current_chunk = ""
-            chunk_number = 1
-
-            for line in lines:
-                # Check if adding this line would exceed the limit
-                test_chunk = current_chunk + line + "\n"
-                if len(test_chunk) > max_length and current_chunk:
-                    # Send current chunk
-                    chunk_header = f"📄 Part {chunk_number}:\n" + "─" * 20 + "\n"
-                    await error_channel.send(f"```\n{chunk_header}{current_chunk}\n```")
-                    await asyncio.sleep(15)  # 15 second delay between parts!!
-                    current_chunk = line + "\n"
-                    chunk_number += 1
-                else:
-                    current_chunk = test_chunk
-
-            # Send final chunk if any content remains
-            if current_chunk.strip():
-                chunk_header = f"📄 Part {chunk_number}:\n" + "─" * 20 + "\n"
-                await error_channel.send(f"```\n{chunk_header}{current_chunk}\n```")
-
-    except Exception as e:
-        # Fallback to console if Discord fails
-        original_print(f"Failed to send batched logs: {e}")
-        for msg in log_batch:
-            original_print(f"[BATCH] {msg['content']}")
-
-    # Clear the batch
-    log_batch.clear()
-
-
-def schedule_batch_send():
-    """Schedule sending batched logs after a delay"""
-    global batch_timer, _bot_instance
-
-    if batch_timer:
-        batch_timer.cancel()
-
-    if not _bot_instance:
-        return
-
-
-    async def delayed_send():
-        await asyncio.sleep(30)  # Wait 30 seconds to batch more messages
-        await send_batched_logs()
-
-    try:
-        loop = asyncio.get_event_loop()
-        batch_timer = loop.create_task(delayed_send())
-    except Exception as e:
-        original_print(f"Failed to schedule batch send: {e}")
-
-
-async def log_error(message, error=None, is_info=False):
-    """Log critical errors immediately (bypasses batching for important errors)"""
-    if not _bot_instance:
-        original_print(f"Bot not ready for logging: {message}")
-        return
-
-    error_channel = _bot_instance.get_channel(ERROR_LOG_CHANNEL)
-    if error_channel:
-        timestamp = discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-        prefix = "ℹ️ INFO" if is_info else "🚨 CRITICAL ERROR"
-
-        log_message = f"**{prefix}** - {timestamp} UTC\n"
-        log_message += f"```\n{message}\n"
-
-        if error and not is_info:
-            log_message += f"\nError Details:\n{str(error)[:500]}\n"
-
-        log_message += "```"
-
-        try:
-            await error_channel.send(log_message)
-        except Exception as e:
-            original_print(f"Failed to send critical error log: {e}")
-    else:
-        original_print(f"Error channel not found. Message: {message}")
-
-
-def log_to_discord_batch(message, is_error=False):
-    """Add message to batch for later sending"""
-    global log_batch
-
-    # Add to batch
-    log_batch.append({
-        'content': message,
-        'is_error': is_error,
-        'timestamp': discord.utils.utcnow()
-    })
-
-    # Schedule batch sending
-    schedule_batch_send()
-
-    # If batch gets very large, send immediately to avoid memory issues
-    if len(log_batch) >= 100:  # Much higher threshold
-        if _bot_instance:
-            import asyncio
-            try:
-                loop = asyncio.get_event_loop()
-                loop.create_task(send_batched_logs())
-            except:
-                pass
-
-
-# Custom print function that batches messages
+# Store original print
 original_print = print
 
-
-def discord_print(*args, **kwargs):
-    """Replace print to send output to both console and Discord (batched)"""
-    # Print to console as normal
+def custom_print(*args, **kwargs):
+    """Print to console AND write to log file"""
+    # Print to console
     original_print(*args, **kwargs)
-
-    # Also add to Discord batch
-    if args and _bot_instance:
+    # Write to log file
+    if args:
         message = ' '.join(str(arg) for arg in args)
-        # Determine if this looks like an error
-        error_keywords = ['error', 'failed', 'exception', 'critical', 'missing demo', '❌', '🚨', '⚠️']
-        is_error = any(keyword in message.lower() for keyword in error_keywords)
-        log_to_discord_batch(message, is_error)
+        write_to_log(message)
 
-
-# Replace the built-in print function
-print = discord_print
-
-
-@bot.event
-async def on_ready():
-    global _bot_instance
-    _bot_instance = bot  # Store bot reference for logging
-
-    print(f"Bot ready! Connected to {len(bot.guilds)} servers")
-    print(f"Monitoring {len(RECORD_CHANNELS)} channels for record updates")
-    if ERROR_LOG_CHANNEL:
-        print(f"Error logging enabled for channel {ERROR_LOG_CHANNEL}")
-    auto_check.start()  # start the background loop when the bot is ready
-    backup_database.start()
-
-@bot.command(name='update')
-async def manual_update(ctx):
-    await ctx.send("🔄 Checking for updates...")
-
-    record_updates = checkforupdates()
-
-    if not record_updates:
-        await ctx.send("ℹ️ No new records found.")
-        return
-
-    embeds = create_records_embeds(record_updates)
-
-    # Send to ALL record channels
-    successful = 0
-    for channel_id in RECORD_CHANNELS:
-        channel = bot.get_channel(channel_id)
-        if channel:
-            await channel.send(embeds=embeds)
-            successful += 1
-
-    #await ctx.send(f"✅ Sent updates to {successful} configured channels.")
-
-
-
-
+# Replace built-in print
+print = custom_print
 
 @tasks.loop(minutes=config.getint('Settings', 'poll_rate'))
 async def auto_check():
@@ -1191,7 +1005,7 @@ async def auto_check():
         for channel_id in RECORD_CHANNELS:
             channel = bot.get_channel(channel_id)
             if channel is None:
-                await log_error(f"Channel {channel_id} not found. Bot may not be in that server or lacks permissions.")
+                print(f"❌ Channel {channel_id} not found. Bot may not be in that server or lacks permissions.")
                 failed_updates += 1
                 continue
 
@@ -1203,10 +1017,10 @@ async def auto_check():
                 successful_updates += 1
 
             except discord.Forbidden:
-                await log_error(f"No permission to send messages in {channel.guild.name}#{channel.name}")
+                print(f"❌ No permission to send messages in {channel.guild.name}#{channel.name}")
                 failed_updates += 1
             except Exception as e:
-                await log_error(f"Unexpected error sending to {channel.guild.name}#{channel.name}", e)
+                print(f"❌ Unexpected error sending to {channel.guild.name}#{channel.name}: {e}")
                 failed_updates += 1
 
         # summary/log
@@ -1215,52 +1029,91 @@ async def auto_check():
         if failed_updates > 0:
             summary += f" ({failed_updates} failed)"
         print(summary)
-        if failed_updates > 0:
-            await log_error(summary)
 
     except Exception as e:
         error_msg = f"Critical error in auto_check: {str(e)}"
         print(f"❌ {error_msg}")
-        await log_error("Critical error in auto_check loop", e)
 
+@bot.event
+async def on_ready():
+    print(f"Bot ready! Connected to {len(bot.guilds)} servers")
+    print(f"Monitoring {len(RECORD_CHANNELS)} channels for record updates")
+    print(f"Logging to: {LOG_DIR}")
+    auto_check.start()
+    backup_database.start()
 
-# Add command to clear the stored message references
-@bot.command()
-async def clear_embed(ctx):
-    global last_embed_messages
-    last_embed_messages.clear()
-    await ctx.send("✅ Cleared all embed message references. Next update will create new embeds.")
+@bot.command(name='update')
+async def manual_update(ctx):
+    await ctx.send("🔄 Checking for updates...")
 
+    record_updates = checkforupdates()
 
-# Add command to get embed info
-@bot.command()
-async def embed_info(ctx):
-    global last_embed_messages
-    if last_embed_messages:
-        info_text = f"📋 Tracking {len(last_embed_messages)} embed messages:\n"
-        for channel_id, message in last_embed_messages.items():
+    if not record_updates:
+        await ctx.send("ℹ️ No new records found.")
+        return
+
+    embeds = create_records_embeds(record_updates)
+
+    # Send to ALL record channels
+    successful = 0
+    for channel_id in RECORD_CHANNELS:
+        channel = bot.get_channel(channel_id)
+        if channel:
+            await channel.send(embeds=embeds)
+            successful += 1
+
+    #await ctx.send(f"✅ Sent updates to {successful} configured channels.")
+
+backup_interval_hours = config.getint('BACKUP', 'backup_interval_hours')
+@tasks.loop(hours=backup_interval_hours)
+async def backup_database():
+    """Backup database and clean old backups AND log files"""
+    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    backup_filename = f"backup_{timestamp}.sqlite"
+    backup_path = os.path.join(BACKUP_DIR, backup_filename)
+
+    # Perform database backup
+    try:
+        shutil.copy(DB_PATH, backup_path)
+        print(f"Backup successful: {backup_filename}")
+    except Exception as e:
+        print(f"Error while backing up the database: {e}")
+
+    # Clean old backups
+    current_time = time.time()
+    for filename in os.listdir(BACKUP_DIR):
+        file_path = os.path.join(BACKUP_DIR, filename)
+        file_creation_time = os.path.getctime(file_path)
+        if (current_time - file_creation_time) > max_backup_days * 86400:
             try:
-                channel = bot.get_channel(channel_id)
-                channel_name = f"{channel.guild.name}#{channel.name}" if channel else f"Channel {channel_id}"
-                embed_count = len(message.embeds) if hasattr(message, 'embeds') else 1
-                info_text += f"• {channel_name}: Message {message.id} ({embed_count} embeds)\n"
-            except:
-                info_text += f"• Channel {channel_id}: Message {message.id}\n"
-        await ctx.send(info_text[:2000])  # Discord message limit
-    else:
-        await ctx.send("❌ No embed messages currently tracked.")
+                os.remove(file_path)
+                print(f"Deleted old backup: {filename}")
+            except Exception as e:
+                print(f"Error deleting backup {filename}: {e}")
+
+    # Clean old log files (same retention period as backups)
+    try:
+        if os.path.exists(LOG_DIR):
+            for filename in os.listdir(LOG_DIR):
+                if filename.startswith("bot_log_") and filename.endswith(".txt"):
+                    file_path = os.path.join(LOG_DIR, filename)
+                    file_creation_time = os.path.getctime(file_path)
+                    if (current_time - file_creation_time) > max_backup_days * 86400:
+                        os.remove(file_path)
+                        print(f"Deleted old log file: {filename}")
+    except Exception as e:
+        print(f"Error cleaning old log files: {e}")
 
 DB_PATH = config.get('Settings', 'main_db_path')
 
 # Define where you want to store your backups
 BACKUP_DIR = config.get('BACKUP', 'backup_dir')
-import datetime,time
 backup_interval_hours = config.getint('BACKUP', 'backup_interval_hours')
 max_backup_days = config.getint('BACKUP', 'max_backup_days')
 @tasks.loop(hours=backup_interval_hours)  # Run every 72 hours (3 days)
 async def backup_database():
     # Generate a timestamp for the backup filename
-    timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     backup_filename = f"backup_{timestamp}.sqlite"
     backup_path = os.path.join(BACKUP_DIR, backup_filename)
 
